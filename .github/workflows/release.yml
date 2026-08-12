@@ -43,31 +43,49 @@ jobs:
             sdk/build/XCFrameworks/release/Pulsepond.xcframework \
             Pulsepond.xcframework.zip
           shasum -a 256 Pulsepond.xcframework.zip > Pulsepond.xcframework.zip.sha256
-      - name: Attach Apple artifact and checksum
+          archive_sha="$(shasum -a 256 Pulsepond.xcframework.zip | awk '{print $1}')"
+          jq -n \
+            --arg artifact "Pulsepond.xcframework.zip" \
+            --arg commit "$GITHUB_SHA" \
+            --arg sha256 "$archive_sha" \
+            '{artifact: $artifact, commit: $commit, sha256: $sha256}' \
+            > Pulsepond.xcframework.zip.provenance.json
+      - name: Attach immutable Apple artifacts
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           archive="Pulsepond.xcframework.zip"
           checksum="Pulsepond.xcframework.zip.sha256"
+          provenance="Pulsepond.xcframework.zip.provenance.json"
           assets="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
           archive_exists=false
           checksum_exists=false
+          provenance_exists=false
           grep -Fxq "$archive" <<< "$assets" && archive_exists=true
           grep -Fxq "$checksum" <<< "$assets" && checksum_exists=true
-          if [[ "$archive_exists" == true && "$checksum_exists" == true ]]; then
+          grep -Fxq "$provenance" <<< "$assets" && provenance_exists=true
+          if [[ "$archive_exists" == true && "$checksum_exists" == true && "$provenance_exists" == true ]]; then
             mkdir existing-assets
             gh release download "$GITHUB_REF_NAME" \
               --pattern "$archive" \
               --pattern "$checksum" \
+              --pattern "$provenance" \
               --dir existing-assets
-            cmp "$archive" "existing-assets/$archive"
-            cmp "$checksum" "existing-assets/$checksum"
-            echo "Existing release assets are byte-identical; continuing the retry."
-          elif [[ "$archive_exists" == false && "$checksum_exists" == false ]]; then
-            gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum"
+            expected_sha="$(jq -er --arg commit "$GITHUB_SHA" \
+              'select(.artifact == "Pulsepond.xcframework.zip" and .commit == $commit) | .sha256' \
+              "existing-assets/$provenance")"
+            checksum_sha="$(awk 'NR == 1 {print $1}' "existing-assets/$checksum")"
+            actual_sha="$(shasum -a 256 "existing-assets/$archive" | awk '{print $1}')"
+            if [[ ! "$expected_sha" =~ ^[0-9a-f]{64}$ || "$checksum_sha" != "$expected_sha" || "$actual_sha" != "$expected_sha" ]]; then
+              echo "Existing Pulsepond XCFramework assets failed provenance verification." >&2
+              exit 1
+            fi
+            echo "Existing release assets match this commit; continuing the retry."
+          elif [[ "$archive_exists" == false && "$checksum_exists" == false && "$provenance_exists" == false ]]; then
+            gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" "$provenance"
           else
-            echo "Release contains an incomplete Pulsepond XCFramework asset pair." >&2
+            echo "Release contains an incomplete Pulsepond XCFramework artifact set." >&2
             exit 1
           fi
       - name: Publish Android artifact to Maven Central

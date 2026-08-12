@@ -7,8 +7,10 @@ if [[ ! -d "$framework_slice/Pulsepond.framework" ]]; then
   exit 1
 fi
 
+simulator_sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 xcrun swiftc \
   -typecheck \
+  -sdk "$simulator_sdk" \
   -target arm64-apple-ios13.0-simulator \
   -F "$framework_slice" \
   -framework Pulsepond \
