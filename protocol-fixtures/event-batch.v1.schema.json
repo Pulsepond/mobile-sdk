@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulsepond.dev/schemas/event-batch.v1.schema.json",
+  "title": "Pulsepond foundation event batch v1",
+  "$comment": "The schema is structural. Consumers must also run @pulsepond/protocol/semantics to enforce event_id uniqueness within a batch.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["events"],
+  "properties": {
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/event" }
+    }
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "schema_version",
+        "event_name",
+        "occurred_at",
+        "platform",
+        "environment",
+        "anonymous_installation_id",
+        "session_id"
+      ],
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        },
+        "schema_version": { "const": 1 },
+        "event_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:19(?:7[0-9]|[89][0-9])|[2-9][0-9]{3})-.*Z$"
+        },
+        "platform": {
+          "enum": ["android", "ios", "other", "server", "web"]
+        },
+        "app_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[\\x21-\\x7E](?:[\\x20-\\x7E]*[\\x21-\\x7E])?$"
+            },
+            { "type": "null" }
+          ]
+        },
+        "release": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[\\x21-\\x7E](?:[\\x20-\\x7E]*[\\x21-\\x7E])?$"
+            },
+            { "type": "null" }
+          ]
+        },
+        "environment": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        },
+        "anonymous_installation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7E](?:[\\x20-\\x7E]*[\\x21-\\x7E])?$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7E](?:[\\x20-\\x7E]*[\\x21-\\x7E])?$"
+        },
+        "properties": {
+          "type": "object",
+          "default": {},
+          "maxProperties": 32,
+          "propertyNames": {
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+          },
+          "additionalProperties": { "$ref": "#/$defs/propertyValue" }
+        }
+      }
+    },
+    "propertyValue": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[\\x21-\\x7E](?:[\\x20-\\x7E]*[\\x21-\\x7E])?$"
+        }
+      ]
+    }
+  }
+}
