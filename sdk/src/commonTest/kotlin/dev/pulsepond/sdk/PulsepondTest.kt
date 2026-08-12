@@ -128,10 +128,17 @@ class PulsepondTest {
     fun boundedQueueFailsClosedAndEmitsOnlyRedactedDiagnostics() = runTest {
         val transport = FakeTransport(FakeOutcome.Response(202))
         val diagnostics = mutableListOf<PulsepondDiagnostic>()
-        val client = client(transport, diagnostics, batchSize = 1, maxQueueSize = 1)
+        val client = client(
+            transport,
+            diagnostics,
+            batchSize = 2,
+            maxQueueSize = 2,
+            coroutineScope = this,
+        )
 
         assertNotEquals(null, client.track("first"))
-        assertNull(client.track("second"))
+        assertNotEquals(null, client.track("second"))
+        assertNull(client.track("third"))
         assertEquals(PulsepondDiagnosticCode.QueueFull, diagnostics.single().code)
         assertEquals(1, diagnostics.single().droppedEvents)
         client.shutdown()
