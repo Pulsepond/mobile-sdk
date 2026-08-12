@@ -57,11 +57,16 @@ class PersistenceTest {
         persistence.append(event(installationIdOne))
         fileSystem.appendingSink(directory / "$installationIdOne.events").buffer().use { sink ->
             sink.writeUtf8("{\"event_name\":\"invalid\"}\n")
+            sink.writeUtf8(event(installationIdOne).json().toString().replace(
+                "\"event_name\":\"app_open\"",
+                "\"event_name\":123",
+            ))
+            sink.writeByte('\n'.code)
         }
 
         val restored = FileEventPersistence(fileSystem, directory).load { installationIdTwo }
 
-        assertEquals(1, restored.recoveredRecords)
+        assertEquals(2, restored.recoveredRecords)
         assertEquals(1, restored.events.size)
         val compacted = FileEventPersistence(fileSystem, directory).load { installationIdTwo }
         assertEquals(0, compacted.recoveredRecords)

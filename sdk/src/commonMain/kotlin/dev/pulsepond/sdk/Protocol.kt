@@ -7,7 +7,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -17,6 +16,7 @@ import kotlin.time.Instant
 internal const val eventSchemaVersion: Int = 1
 internal const val maxBatchBytes: Int = 60_000
 internal const val maxQueueBytes: Int = 1_000_000
+private val persistedPlatforms: Set<String> = setOf("android", "ios", "web", "server", "other")
 
 internal data class EventRecord(
     val eventId: String,
@@ -100,7 +100,7 @@ internal fun parsePersistedEvent(value: String): EventRecord? = runCatching {
         error("identifiers must be UUIDv7")
     }
     validateSlug("eventName", eventName, 64)
-    if (platform !in setOf("android", "ios", "web", "server", "other")) {
+    if (platform !in persistedPlatforms) {
         error("platform is invalid")
     }
     validateOptionalText("appVersion", appVersion, 64)
@@ -121,11 +121,19 @@ internal fun parsePersistedEvent(value: String): EventRecord? = runCatching {
     )
 }.getOrNull()
 
-private fun JsonObject.requiredString(name: String): String =
-    this[name]?.jsonPrimitive?.contentOrNull ?: error("$name is required")
+private fun JsonObject.requiredString(name: String): String {
+    val primitive = this[name] as? JsonPrimitive ?: error("$name is required")
+    if (!primitive.isString) error("$name must be a string")
+    return primitive.content
+}
 
-private fun JsonObject.optionalString(name: String): String? =
-    this[name]?.jsonPrimitive?.contentOrNull
+private fun JsonObject.optionalString(name: String): String? {
+    val element = this[name] ?: return null
+    if (element === JsonNull) return null
+    val primitive = element as? JsonPrimitive ?: error("$name must be a string")
+    if (!primitive.isString) error("$name must be a string")
+    return primitive.content
+}
 
 internal fun isUuidV7(value: String): Boolean =
     value.length == 36 && value[14] == '7' && value[19].lowercaseChar() in "89ab" &&

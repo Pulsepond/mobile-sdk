@@ -305,9 +305,9 @@ public class Pulsepond internal constructor(
     @Throws(PulsepondConfigurationException::class, PulsepondStorageException::class)
     public fun reset() {
         val now = nowMilliseconds()
-        val newInstallationId = createUuidV7(now, randomBytes)
         synchronized(stateLock) {
             if (closed) return
+            val newInstallationId = createUuidV7(now, randomBytes)
             persistence.reset(newInstallationId)
             generationInvalidation.complete(Unit)
             generation += 1

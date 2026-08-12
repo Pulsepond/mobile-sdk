@@ -68,6 +68,7 @@ internal class FileEventPersistence(
             }
         }
         installationId = activeId
+        deleteOrphanedJournals(activeId)
         val journal = journal(activeId)
         if (!fileSystem.exists(journal)) return@storageOperation PersistedState(activeId, emptyList(), recovered)
         if ((fileSystem.metadata(journal).size ?: 0) > maximumJournalBytes) {
