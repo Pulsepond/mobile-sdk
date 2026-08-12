@@ -134,6 +134,18 @@ internal class PersistenceWriter(
         }
     }
 
+    suspend fun replace(events: List<EventRecord>): Boolean {
+        val completion = CompletableDeferred<Boolean>()
+        return try {
+            commands.send(PersistenceCommand.Replace(events.toList(), completion))
+            completion.await()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     suspend fun reset(installationId: String): PersistenceResetResult {
         val completion = CompletableDeferred<Result<PersistenceResetResult>>()
         try {

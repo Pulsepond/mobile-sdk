@@ -121,7 +121,7 @@ public class Pulsepond internal constructor(
     private var resetting: Boolean = false
     private var closing: Boolean = false
     private var closed: Boolean = false
-    private var shutdownCompletion: CompletableDeferred<Unit>? = null
+    private var shutdownCompletion: CompletableDeferred<Throwable?>? = null
     private var automaticDeliveryStarted: Boolean = false
     private val persistenceWriter: PersistenceWriter = PersistenceWriter(
         persistence = persistence,
@@ -364,14 +364,14 @@ public class Pulsepond internal constructor(
     public suspend fun shutdown() {
         var initiatesShutdown = false
         val completion = synchronized(stateLock) {
-            shutdownCompletion ?: CompletableDeferred<Unit>().also {
+            shutdownCompletion ?: CompletableDeferred<Throwable?>().also {
                 shutdownCompletion = it
                 closing = true
                 initiatesShutdown = true
             }
         }
         if (!initiatesShutdown) {
-            completion.await()
+            completion.await()?.let { throw it }
             return
         }
 
@@ -388,6 +388,14 @@ public class Pulsepond internal constructor(
                 generation += 1
             }
             flushLock.withLock {
+                val pendingEvents = synchronized(stateLock) {
+                    queue.map(QueuedEvent::event)
+                }
+                val pendingEventsPersisted = when {
+                    pendingEvents.isEmpty() -> true
+                    !persistence.isDurable -> false
+                    else -> persistenceWriter.replace(pendingEvents)
+                }
                 val droppedEvents = synchronized(stateLock) {
                     val count = queue.size
                     queue.clear()
@@ -396,7 +404,7 @@ public class Pulsepond internal constructor(
                     closing = false
                     count
                 }
-                if (droppedEvents > 0 && !persistence.isDurable) {
+                if (droppedEvents > 0 && !pendingEventsPersisted) {
                     notify(
                         PulsepondDiagnostic(
                             code = PulsepondDiagnosticCode.DeliveryFailed,
@@ -404,6 +412,11 @@ public class Pulsepond internal constructor(
                             retryable = false,
                         ),
                     )
+                    if (persistence.isDurable && failure == null) {
+                        failure = PulsepondStorageException(
+                            "Pulsepond could not preserve pending events during shutdown",
+                        )
+                    }
                 }
                 try {
                     persistenceWriter.close()
@@ -417,7 +430,7 @@ public class Pulsepond internal constructor(
                 } finally {
                     if (ownsScope) scope.cancel()
                     ownershipLease?.release()
-                    completion.complete(Unit)
+                    completion.complete(failure?.takeUnless { it is CancellationException })
                 }
             }
         }

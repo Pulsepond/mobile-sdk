@@ -358,6 +358,25 @@ class PulsepondTest {
         assertTrue(transport.closed)
         assertFailsWith<PulsepondValidationException> { client.track("too_late") }
     }
+
+    @Test
+    fun shutdownReportsAndFailsWhenPendingEventsCannotBePersisted() = runTest {
+        val diagnostics = mutableListOf<PulsepondDiagnostic>()
+        val client = client(
+            transport = FakeTransport(),
+            diagnostics = diagnostics,
+            persistence = FailingPersistence(failAppend = true, failReplace = true),
+            coroutineScope = this,
+        )
+        client.track("pending")
+
+        assertFailsWith<PulsepondStorageException> { client.shutdown() }
+
+        val loss = diagnostics.last { it.code == PulsepondDiagnosticCode.DeliveryFailed }
+        assertEquals(1, loss.droppedEvents)
+        assertFalse(loss.retryable)
+        assertFailsWith<PulsepondValidationException> { client.track("too_late") }
+    }
 }
 
 private sealed interface FakeOutcome {
@@ -422,6 +441,7 @@ private class BlockingTransport : RecordingTransport() {
 
 private class FailingPersistence(
     private val failAppend: Boolean = false,
+    private val failReplace: Boolean = false,
     private val failReset: Boolean = false,
     private val incompleteReset: Boolean = false,
 ) : EventPersistence {
@@ -444,6 +464,7 @@ private class FailingPersistence(
     }
 
     override fun replace(events: List<EventRecord>) {
+        if (failReplace) throw PulsepondStorageException("test replace failure")
         this.events.clear()
         this.events += events
     }
