@@ -13,52 +13,51 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
       - name: Validate Gradle wrapper
-        uses: gradle/actions/wrapper-validation@v4
+        uses: gradle/actions/wrapper-validation@v6
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
       - name: Validate release version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "Release tag must be v<semver> or <semver>." >&2
             exit 1
           fi
-          echo "VERSION_NAME=$version" >> "$GITHUB_ENV"
+          head_commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          if [[ "$head_commit" != "$tag_commit" ]]; then
+            echo "Checked-out commit does not match the release tag." >&2
+            exit 1
+          fi
+          echo "ORG_GRADLE_PROJECT_pulsepondVersion=$version" >> "$GITHUB_ENV"
+          echo "PULSEPOND_RELEASE_COMMIT=$tag_commit" >> "$GITHUB_ENV"
       - name: Test and build release artifacts
         run: ./gradlew :sdk:testAndroidHostTest :sdk:iosSimulatorArm64Test :sdk:checkKotlinAbi :sdk:assemblePulsepondReleaseXCFramework
-      - name: Compile Swift consumer
-        run: ./scripts/check-swift-api.sh
-      - name: Package Apple artifact
-        shell: bash
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            sdk/build/XCFrameworks/release/Pulsepond.xcframework \
-            Pulsepond.xcframework.zip
-          shasum -a 256 Pulsepond.xcframework.zip > Pulsepond.xcframework.zip.sha256
-          archive_sha="$(shasum -a 256 Pulsepond.xcframework.zip | awk '{print $1}')"
-          jq -n \
-            --arg artifact "Pulsepond.xcframework.zip" \
-            --arg commit "$GITHUB_SHA" \
-            --arg sha256 "$archive_sha" \
-            '{artifact: $artifact, commit: $commit, sha256: $sha256}' \
-            > Pulsepond.xcframework.zip.provenance.json
+      - name: Package and compile Apple artifact consumer
+        run: ./scripts/check-apple-artifact.sh build/release-assets "$PULSEPOND_RELEASE_COMMIT"
       - name: Attach immutable Apple artifacts
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           archive="Pulsepond.xcframework.zip"
           checksum="Pulsepond.xcframework.zip.sha256"
           provenance="Pulsepond.xcframework.zip.provenance.json"
-          assets="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
+          asset_dir="build/release-assets"
+          assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
           archive_exists=false
           checksum_exists=false
           provenance_exists=false
@@ -67,12 +66,12 @@ jobs:
           grep -Fxq "$provenance" <<< "$assets" && provenance_exists=true
           if [[ "$archive_exists" == true && "$checksum_exists" == true && "$provenance_exists" == true ]]; then
             mkdir existing-assets
-            gh release download "$GITHUB_REF_NAME" \
+            gh release download "$RELEASE_TAG" \
               --pattern "$archive" \
               --pattern "$checksum" \
               --pattern "$provenance" \
               --dir existing-assets
-            expected_sha="$(jq -er --arg commit "$GITHUB_SHA" \
+            expected_sha="$(jq -er --arg commit "$PULSEPOND_RELEASE_COMMIT" \
               'select(.artifact == "Pulsepond.xcframework.zip" and .commit == $commit) | .sha256' \
               "existing-assets/$provenance")"
             checksum_sha="$(awk 'NR == 1 {print $1}' "existing-assets/$checksum")"
@@ -83,7 +82,10 @@ jobs:
             fi
             echo "Existing release assets match this commit; continuing the retry."
           elif [[ "$archive_exists" == false && "$checksum_exists" == false && "$provenance_exists" == false ]]; then
-            gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" "$provenance"
+            gh release upload "$RELEASE_TAG" \
+              "$asset_dir/$archive" \
+              "$asset_dir/$checksum" \
+              "$asset_dir/$provenance"
           else
             echo "Release contains an incomplete Pulsepond XCFramework artifact set." >&2
             exit 1

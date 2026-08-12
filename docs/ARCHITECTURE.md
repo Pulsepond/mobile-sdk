@@ -38,7 +38,7 @@ A flush removes data only after a terminal outcome:
 
 `requestFlush` is the lifecycle-safe, non-suspending entry point. It coalesces repeated requests onto the SDK-owned scope and re-enables a queue deferred by exhausted retries. It does not claim a platform background execution grant; if the process is stopped, the durable queue remains available on the next launch. Platform applications choose the appropriate process, application, or scene callback instead of the SDK silently registering one.
 
-The canonical protocol schema and complete event-batch fixture set are commit-pinned in `protocol-fixtures`. Android host tests consume that independent snapshot, while macOS CI compiles a real Swift consumer against the assembled XCFramework so Objective-C export changes cannot silently invalidate the documented API.
+The canonical protocol schema and complete event-batch fixture set are commit-pinned in `protocol-fixtures`. Android host tests consume that independent snapshot. CI publishes the Maven module to an isolated repository and compiles a separate Android application against it. On macOS, CI packages the release XCFramework ZIP, verifies its checksum and commit provenance, extracts it, and compiles a real Swift consumer. Publication metadata, archive shape, and Objective-C export changes therefore cannot silently invalidate the documented integration.
 
 ## Current limitations
 
@@ -48,4 +48,4 @@ Swift Package Manager needs an immutable binary URL and checksum for every versi
 
 ## Compatibility policy
 
-The event envelope is versioned independently through `schema_version`. Public Kotlin API dumps are checked in CI. Until 1.0, release notes may describe source-breaking SDK changes. After 1.0, incompatible public API or protocol changes require a major version.
+The event envelope is versioned independently through `schema_version`. Public Kotlin API dumps are checked in CI. The SDK compiler stays within the Kotlin metadata ceiling readable by the Android Gradle Plugin used by the standalone consumer check; this prevents publishing a valid Maven module that ordinary Android applications cannot compile. Until 1.0, release notes may describe source-breaking SDK changes. After 1.0, incompatible public API or protocol changes require a major version.
