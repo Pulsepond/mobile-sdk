@@ -343,7 +343,7 @@ public class Pulsepond internal constructor(
     )
     public suspend fun reset() {
         val now = nowMilliseconds()
-        val newInstallationId = synchronized(stateLock) {
+        val (newInstallationId, resetRevision) = synchronized(stateLock) {
             if (closed) return
             if (resetting || closing) {
                 throw PulsepondValidationException(
@@ -353,19 +353,22 @@ public class Pulsepond internal constructor(
             val installationId = createUuidV7(now, randomBytes)
             resetting = true
             generationInvalidation.complete(Unit)
-            installationId
+            installationId to queueRevision + 1
         }
         var resetCompleted = true
         try {
             withContext(NonCancellable) {
                 flushLock.withLock {
-                    resetCompleted = persistenceWriter.reset(newInstallationId).completed
+                    resetCompleted = persistenceWriter.reset(
+                        newInstallationId,
+                        resetRevision,
+                    ).completed
                     synchronized(stateLock) {
                         generation += 1
                         generationInvalidation = CompletableDeferred()
                         queue.clear()
                         queueBytes = 0
-                        queueRevision += 1
+                        queueRevision = resetRevision
                         durableQueueRevision = queueRevision
                         durableEventIds.clear()
                         effectiveBatchSize = configuration.batchSize
@@ -802,20 +805,12 @@ public class Pulsepond internal constructor(
     private fun markSnapshotDurable(
         revision: Long,
         eventIds: List<String>,
-        exactByConstruction: Boolean,
+        isExact: Boolean,
     ) {
         synchronized(stateLock) {
             durableEventIds.clear()
             durableEventIds += eventIds
-            val currentEventIds = queue.map { it.event.eventId }
-            durableQueueRevision = if (
-                exactByConstruction ||
-                (queueRevision == revision && currentEventIds == eventIds)
-            ) {
-                revision
-            } else {
-                -1
-            }
+            durableQueueRevision = if (isExact) revision else -1
         }
     }
 

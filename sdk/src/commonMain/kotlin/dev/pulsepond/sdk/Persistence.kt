@@ -59,6 +59,7 @@ private sealed interface PersistenceCommand {
 
     data class Reset(
         val installationId: String,
+        val revision: Long,
         val completion: CompletableDeferred<Result<PersistenceResetResult>>,
     ) : PersistenceCommand
 
@@ -79,10 +80,15 @@ internal class PersistenceWriter(
     private val commands: Channel<PersistenceCommand> = Channel(capacity)
     private val job = scope.launch {
         val currentEvents = initialEvents.toMutableList()
+        var currentRevision = 0L
+        var currentEventsAreExact = true
         for (command in commands) {
             when (command) {
                 is PersistenceCommand.Append -> {
                     currentEvents += command.event
+                    currentEventsAreExact = currentEventsAreExact &&
+                        command.revision == currentRevision + 1
+                    currentRevision = command.revision
                     try {
                         when (persistence.append(command.event, currentEvents)) {
                             AppendPersistenceResult.AppendedEvent -> {
@@ -92,7 +98,7 @@ internal class PersistenceWriter(
                                 onSnapshotPersisted(
                                     command.revision,
                                     currentEvents.map(EventRecord::eventId),
-                                    false,
+                                    currentEventsAreExact,
                                 )
                             }
                         }
@@ -103,6 +109,8 @@ internal class PersistenceWriter(
                 is PersistenceCommand.Replace -> {
                     currentEvents.clear()
                     currentEvents += command.events
+                    currentRevision = command.revision
+                    currentEventsAreExact = true
                     command.completion.complete(
                         try {
                             persistence.replace(command.events)
@@ -121,6 +129,8 @@ internal class PersistenceWriter(
                     val result = try {
                         val reset = persistence.reset(command.installationId)
                         currentEvents.clear()
+                        currentRevision = command.revision
+                        currentEventsAreExact = true
                         Result.success(reset)
                     } catch (failure: PulsepondStorageException) {
                         Result.failure(failure)
@@ -166,10 +176,13 @@ internal class PersistenceWriter(
         }
     }
 
-    suspend fun reset(installationId: String): PersistenceResetResult {
+    suspend fun reset(
+        installationId: String,
+        revision: Long,
+    ): PersistenceResetResult {
         val completion = CompletableDeferred<Result<PersistenceResetResult>>()
         try {
-            commands.send(PersistenceCommand.Reset(installationId, completion))
+            commands.send(PersistenceCommand.Reset(installationId, revision, completion))
         } catch (error: CancellationException) {
             throw error
         } catch (_: Throwable) {

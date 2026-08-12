@@ -268,6 +268,44 @@ class PulsepondTest {
     }
 
     @Test
+    fun compactionRemainsExactWhenANewerAppendIsAlreadyQueued() = runTest {
+        val diagnostics = mutableListOf<PulsepondDiagnostic>()
+        val persistence = CallbackCompactingPersistence()
+        val client = client(
+            transport = FakeTransport(
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+            ),
+            diagnostics = diagnostics,
+            persistence = persistence,
+            coroutineScope = this,
+        )
+        persistence.duringCompaction = {
+            client.track("queued_during_compaction")
+        }
+
+        client.track("compacted")
+        client.awaitPersistence()
+        client.shutdown()
+
+        assertEquals(0, persistence.replaceCalls)
+        assertEquals(
+            listOf("compacted", "queued_during_compaction"),
+            persistence.events.map(EventRecord::eventName),
+        )
+        assertFalse(diagnostics.any { it.code == PulsepondDiagnosticCode.StorageFailed })
+        assertFalse(
+            diagnostics.any {
+                it.code == PulsepondDiagnosticCode.DeliveryFailed && it.droppedEvents > 0
+            },
+        )
+    }
+
+    @Test
     fun trackQueuesPersistenceWithoutCallingStorageInline() = runTest {
         val persistence = FailingPersistence()
         val client = client(
@@ -640,6 +678,48 @@ private class FailingReplacePersistence(
 
     override fun reset(newInstallationId: String): PersistenceResetResult =
         delegate.reset(newInstallationId)
+}
+
+private class CallbackCompactingPersistence : EventPersistence {
+    override val isDurable: Boolean = true
+    val events: MutableList<EventRecord> = mutableListOf()
+    var duringCompaction: (() -> Unit)? = null
+    var replaceCalls: Int = 0
+        private set
+    private var installationId: String? = null
+    private var appendCalls: Int = 0
+
+    override fun load(newInstallationId: () -> String): PersistedState {
+        val activeId = installationId ?: newInstallationId().also { installationId = it }
+        return PersistedState(activeId, events.toList())
+    }
+
+    override fun append(
+        event: EventRecord,
+        currentEvents: List<EventRecord>,
+    ): AppendPersistenceResult {
+        appendCalls += 1
+        return if (appendCalls == 1) {
+            events.clear()
+            events += currentEvents
+            duringCompaction?.invoke()
+            AppendPersistenceResult.ReplacedSnapshot
+        } else {
+            events += event
+            AppendPersistenceResult.AppendedEvent
+        }
+    }
+
+    override fun replace(events: List<EventRecord>) {
+        replaceCalls += 1
+        throw PulsepondStorageException("test replacement failure")
+    }
+
+    override fun reset(newInstallationId: String): PersistenceResetResult {
+        installationId = newInstallationId
+        events.clear()
+        return PersistenceResetResult(completed = true)
+    }
 }
 
 private fun client(
