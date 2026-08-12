@@ -6,12 +6,14 @@ Run the Android tests and public API check on every change:
 
 ```shell
 ./gradlew :sdk:testAndroidHostTest :sdk:checkKotlinAbi
+./scripts/check-android-artifact.sh
 ```
 
 On macOS, also validate the Apple artifact:
 
 ```shell
 ./gradlew :sdk:iosSimulatorArm64Test :sdk:assemblePulsepondReleaseXCFramework
+./scripts/check-apple-artifact.sh
 ```
 
 When intentionally changing a public API, review the source and binary compatibility impact, then update the checked-in API dump:

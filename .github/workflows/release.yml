@@ -31,25 +31,11 @@ jobs:
             echo "Release tag must be v<semver> or <semver>." >&2
             exit 1
           fi
-          echo "VERSION_NAME=$version" >> "$GITHUB_ENV"
+          echo "ORG_GRADLE_PROJECT_pulsepondVersion=$version" >> "$GITHUB_ENV"
       - name: Test and build release artifacts
         run: ./gradlew :sdk:testAndroidHostTest :sdk:iosSimulatorArm64Test :sdk:checkKotlinAbi :sdk:assemblePulsepondReleaseXCFramework
-      - name: Compile Swift consumer
-        run: ./scripts/check-swift-api.sh
-      - name: Package Apple artifact
-        shell: bash
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            sdk/build/XCFrameworks/release/Pulsepond.xcframework \
-            Pulsepond.xcframework.zip
-          shasum -a 256 Pulsepond.xcframework.zip > Pulsepond.xcframework.zip.sha256
-          archive_sha="$(shasum -a 256 Pulsepond.xcframework.zip | awk '{print $1}')"
-          jq -n \
-            --arg artifact "Pulsepond.xcframework.zip" \
-            --arg commit "$GITHUB_SHA" \
-            --arg sha256 "$archive_sha" \
-            '{artifact: $artifact, commit: $commit, sha256: $sha256}' \
-            > Pulsepond.xcframework.zip.provenance.json
+      - name: Package and compile Apple artifact consumer
+        run: ./scripts/check-apple-artifact.sh build/release-assets "$GITHUB_SHA"
       - name: Attach immutable Apple artifacts
         shell: bash
         env:
@@ -58,6 +44,7 @@ jobs:
           archive="Pulsepond.xcframework.zip"
           checksum="Pulsepond.xcframework.zip.sha256"
           provenance="Pulsepond.xcframework.zip.provenance.json"
+          asset_dir="build/release-assets"
           assets="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
           archive_exists=false
           checksum_exists=false
@@ -83,7 +70,10 @@ jobs:
             fi
             echo "Existing release assets match this commit; continuing the retry."
           elif [[ "$archive_exists" == false && "$checksum_exists" == false && "$provenance_exists" == false ]]; then
-            gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" "$provenance"
+            gh release upload "$GITHUB_REF_NAME" \
+              "$asset_dir/$archive" \
+              "$asset_dir/$checksum" \
+              "$asset_dir/$provenance"
           else
             echo "Release contains an incomplete Pulsepond XCFramework artifact set." >&2
             exit 1

@@ -31,6 +31,8 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
       - name: Test Android and verify public API
         run: ./gradlew :sdk:testAndroidHostTest :sdk:checkKotlinAbi
+      - name: Compile consumer against published Android artifact
+        run: ./scripts/check-android-artifact.sh
 
   apple:
     name: iOS and XCFramework
@@ -49,5 +51,5 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
       - name: Test iOS and build XCFramework
         run: ./gradlew :sdk:iosSimulatorArm64Test :sdk:assemblePulsepondReleaseXCFramework
-      - name: Compile Swift consumer
-        run: ./scripts/check-swift-api.sh
+      - name: Package and compile Apple artifact consumer
+        run: ./scripts/check-apple-artifact.sh

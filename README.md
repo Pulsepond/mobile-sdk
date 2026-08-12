@@ -74,7 +74,7 @@ Register the observer with your application lifecycle, for example `ProcessLifec
 
 ## iOS
 
-Download `Pulsepond.xcframework.zip` from a release, verify the published SHA-256 checksum, unpack it, and add `Pulsepond.xcframework` to the Xcode target under **Frameworks, Libraries, and Embedded Content**.
+Download `Pulsepond.xcframework.zip` and its `.sha256` file from the same release, verify the checksum, unpack it, and add `Pulsepond.xcframework` to the Xcode target under **Frameworks, Libraries, and Embedded Content**.
 
 ```swift
 import Pulsepond
@@ -102,7 +102,7 @@ try analytics.track(
 )
 ```
 
-Validation failures cross the generated Objective-C boundary as Swift errors. Configuration, property setters, and tracking use `try`; creation, flush, reset, and shutdown use `try await`. A real Swift consumer is type-checked against the release XCFramework on macOS CI. A hand-written convenience façade and Swift Package Manager distribution are planned before the first stable release.
+Validation failures cross the generated Objective-C boundary as Swift errors. Configuration, property setters, and tracking use `try`; creation, flush, reset, and shutdown use `try await`. macOS CI packages the same ZIP shape used by a release, verifies its checksum and provenance, extracts it, and type-checks a real Swift consumer. A hand-written convenience façade and Swift Package Manager distribution are planned before the first stable release.
 
 Call the non-blocking lifecycle method from an application or scene background callback:
 
@@ -125,7 +125,7 @@ func applicationDidEnterBackground(_ application: UIApplication) {
 - HTTP 202 is the only success response. Network errors, 408, 429, and 5xx responses retry with bounded jitter. Other 4xx responses are terminal.
 - Diagnostics never contain event payloads, property values, endpoint query data, or credentials.
 
-Create clients with `PulsepondAndroid.create` or `PulsepondApple.shared.create`; both select the durable platform implementation.
+Create clients with `PulsepondAndroid.create` or `PulsepondApple.shared.create`; both select the durable platform implementation. CI also publishes the Android module to an isolated local Maven repository and compiles a separate Android application against that artifact, so source-set visibility or publication metadata regressions fail before release.
 
 See [Architecture](docs/ARCHITECTURE.md) for the design constraints and [Contributing](CONTRIBUTING.md) for local verification.
 

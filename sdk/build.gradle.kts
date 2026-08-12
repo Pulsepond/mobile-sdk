@@ -9,12 +9,14 @@ plugins {
 }
 
 group = "dev.pulsepond"
-version = providers.gradleProperty("VERSION_NAME").orElse("0.1.0-SNAPSHOT").get()
+version = providers.gradleProperty("pulsepondVersion").orElse("0.1.0-SNAPSHOT").get()
 
 kotlin {
     explicitApi()
     @OptIn(org.jetbrains.kotlin.gradle.dsl.abi.ExperimentalAbiValidation::class)
-    abiValidation()
+    abiValidation {
+        enabled.set(true)
+    }
 
     android {
         namespace = "dev.pulsepond.sdk"
