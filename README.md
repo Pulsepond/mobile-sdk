@@ -1,19 +1,104 @@
-[![official project](http://jb.gg/badges/official.svg)](https://github.com/JetBrains#jetbrains-on-github)
+# Pulsepond Mobile SDK
 
-# Multiplatform library template
+[![CI](https://github.com/Pulsepond/mobile-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/Pulsepond/mobile-sdk/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-2e6b4f.svg)](LICENSE)
 
-## What is it?
+The first-party Pulsepond SDK for Android and iOS. Its delivery core is written once with Kotlin Multiplatform while the published artifacts stay natural to each platform: a Maven library for Android and a static XCFramework for Apple applications.
 
-This repository contains a simple library project, intended to demonstrate a [Kotlin Multiplatform](https://kotlinlang.org/docs/multiplatform.html) library that is deployable to [Maven Central](https://central.sonatype.com/).
+The SDK deliberately collects only events an application explicitly tracks. There is no automatic screen, click, location, advertising identifier, request-header, or crash collection.
 
-The library has only one function: generate the [Fibonacci sequence](https://en.wikipedia.org/wiki/Fibonacci_sequence) starting from platform-provided numbers. Also, it has a test for each platform just to be sure that tests run.
+> The repository is pre-1.0. The event protocol is stable, but the native packaging and public API may change before the first stable release.
 
-Note that no other actions or tools usually required for the library development are set up, such as [tracking of backwards compatibility](https://kotlinlang.org/docs/jvm-api-guidelines-backward-compatibility.html#tools-designed-to-enforce-backward-compatibility), explicit API mode, licensing, contribution guideline, code of conduct and others. You can find a guide for best practices for designing Kotlin libraries [here](https://kotlinlang.org/docs/api-guidelines-introduction.html).
+## Current support
 
-## Guide
+| Platform | Minimum | Distribution |
+| --- | ---: | --- |
+| Android | API 24 | `dev.pulsepond:pulsepond` on Maven Central |
+| iOS | iOS arm64 and Apple Silicon simulator | `Pulsepond.xcframework` attached to GitHub releases |
 
-Please find the detailed guide [here](https://www.jetbrains.com/help/kotlin-multiplatform-dev/multiplatform-publish-libraries.html).
+Swift Package Manager distribution is intentionally deferred until the binary release workflow can update and verify checksums atomically. Until then, add the release XCFramework directly to the Xcode project.
 
-# Other resources
-* [Publishing via the Central Portal](https://central.sonatype.org/publish-ea/publish-ea-guide/)
-* [Gradle Maven Publish Plugin \- Publishing to Maven Central](https://vanniktech.github.io/gradle-maven-publish-plugin/central/)
+## Android
+
+```kotlin
+dependencies {
+    implementation("dev.pulsepond:pulsepond:<version>")
+}
+```
+
+```kotlin
+import dev.pulsepond.sdk.Pulsepond
+import dev.pulsepond.sdk.PulsepondConfiguration
+import dev.pulsepond.sdk.PulsepondProperties
+
+val analytics = Pulsepond(
+    PulsepondConfiguration(
+        endpoint = "https://pulsepond.example.com/v1/batch",
+        writeKey = "ppw_v1_...",
+        environment = "production",
+        appVersion = BuildConfig.VERSION_NAME,
+        release = "android@${BuildConfig.VERSION_NAME}",
+    ),
+)
+
+analytics.track(
+    "view_work",
+    PulsepondProperties().setString("work_id", "work_123"),
+)
+```
+
+Call `analytics.shutdown()` from a coroutine when the application has a real finalization opportunity. Mobile operating systems do not guarantee a termination callback, so normal delivery is handled by bounded automatic flushes.
+
+## iOS
+
+Download `Pulsepond.xcframework.zip` from a release, verify the published SHA-256 checksum, unpack it, and add `Pulsepond.xcframework` to the Xcode target under **Frameworks, Libraries, and Embedded Content**.
+
+```swift
+import Pulsepond
+
+let analytics = Pulsepond(
+    configuration: PulsepondConfiguration(
+        endpoint: "https://pulsepond.example.com/v1/batch",
+        writeKey: "ppw_v1_...",
+        environment: "production",
+        appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+        release: "ios@1.0.0",
+        batchSize: 20,
+        flushIntervalMilliseconds: 5_000,
+        maxQueueSize: 1_000,
+        eventTtlMilliseconds: 82_800_000,
+        diagnosticListener: nil
+    )
+)
+
+analytics.track(
+    eventName: "view_work",
+    properties: PulsepondProperties().setString(key: "work_id", value: "work_123")
+)
+```
+
+The generated Swift declarations are validated on macOS CI. A thin hand-written Swift façade and Swift Package Manager distribution are planned before the first stable release.
+
+## Contract and delivery
+
+- Events are posted only to the configured HTTPS URL with the exact `/v1/batch` path. Plain HTTP is accepted only for loopback development.
+- Every event receives a UUIDv7 `event_id`, UTC `occurred_at`, platform, environment, anonymous installation ID, and session ID.
+- Properties are flat and intentionally closed to strings, safe integers, booleans, and null. Names and values are bounded before enqueueing.
+- Queues, batches, retry counts, retry delays, and event age are bounded. A 413 response splits a batch without changing event IDs.
+- A batch body is frozen before its first attempt and remains byte-identical across retries.
+- HTTP 202 is the only success response. Network errors, 408, 429, and 5xx responses retry with bounded jitter. Other 4xx responses are terminal.
+- Diagnostics never contain event payloads, property values, endpoint query data, or credentials.
+
+The current pre-1.0 implementation keeps its queue and anonymous identity in memory. It cannot guarantee delivery after process termination or calculate installation retention across separate launches yet. Durable platform storage is the next compatibility boundary and will land before a stable release.
+
+See [Architecture](docs/ARCHITECTURE.md) for the design constraints and [Contributing](CONTRIBUTING.md) for local verification.
+
+## Credentials and privacy
+
+A Pulsepond write key is a publishable, source-scoped ingestion credential. Mobile binaries cannot keep a bundled value secret. Never embed a control-plane token, Cloudflare token, or read credential. Rotate the write key if a source is abused.
+
+Pulsepond cannot know whether a custom property is personal data. Do not send email addresses, authorization values, cookies, full URLs or query strings, search text, feedback bodies, request bodies, or other content that your disclosure and retention policy do not cover.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
