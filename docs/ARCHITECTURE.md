@@ -36,11 +36,13 @@ A flush removes data only after a terminal outcome:
 
 `shutdown` has one shared completion signal. Concurrent callers join the same close operation. Before clearing memory, it makes a final ordered snapshot attempt; if durable storage is still unavailable, shutdown reports the exact loss count and fails instead of claiming a clean close. The writer is then drained before its scope and transport close, and cancellation of the initiating caller still runs cleanup before propagating cancellation. Successfully persisted, unaccepted events remain for the next launch.
 
+`requestFlush` is the lifecycle-safe, non-suspending entry point. It coalesces repeated requests onto the SDK-owned scope and re-enables a queue deferred by exhausted retries. It does not claim a platform background execution grant; if the process is stopped, the durable queue remains available on the next launch. Platform applications choose the appropriate process, application, or scene callback instead of the SDK silently registering one.
+
 The canonical protocol schema and complete event-batch fixture set are commit-pinned in `protocol-fixtures`. Android host tests consume that independent snapshot, while macOS CI compiles a real Swift consumer against the assembled XCFramework so Objective-C export changes cannot silently invalidate the documented API.
 
 ## Current limitations
 
-The pre-1.0 implementation intentionally excludes automatic capture, user profiles, remote configuration, background services, and platform lifecycle hooks. One live client per source/environment is enforced inside a process; multi-process writers are not coordinated.
+The pre-1.0 implementation intentionally excludes automatic capture, user profiles, remote configuration, background services, and automatically registered platform lifecycle observers. One live client per source/environment is enforced inside a process; multi-process writers are not coordinated.
 
 Swift Package Manager needs an immutable binary URL and checksum for every version. The release workflow publishes a checksummed XCFramework first; a Swift façade and atomic package-index workflow will follow rather than committing an unverifiable placeholder manifest.
 

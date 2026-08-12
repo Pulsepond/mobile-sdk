@@ -29,6 +29,7 @@ abstract fun interface dev.pulsepond.sdk/PulsepondDiagnosticListener { // dev.pu
 }
 
 final class dev.pulsepond.sdk/Pulsepond { // dev.pulsepond.sdk/Pulsepond|null[0]
+    final fun requestFlush() // dev.pulsepond.sdk/Pulsepond.requestFlush|requestFlush(){}[0]
     final fun track(kotlin/String): kotlin/String? // dev.pulsepond.sdk/Pulsepond.track|track(kotlin.String){}[0]
     final fun track(kotlin/String, dev.pulsepond.sdk/PulsepondProperties?): kotlin/String? // dev.pulsepond.sdk/Pulsepond.track|track(kotlin.String;dev.pulsepond.sdk.PulsepondProperties?){}[0]
     final suspend fun flush() // dev.pulsepond.sdk/Pulsepond.flush|flush(){}[0]

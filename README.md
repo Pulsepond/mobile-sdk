@@ -58,6 +58,20 @@ suspend fun createAnalytics(context: Context): Pulsepond {
 
 Creation performs recovery on a background dispatcher and is therefore suspending. Keep one client per source and environment. Call `analytics.shutdown()` from a coroutine when the application has a real finalization opportunity. Mobile operating systems do not guarantee a termination callback, so normal delivery is handled by bounded automatic flushes.
 
+For an application-level lifecycle callback, request a non-blocking flush when the process moves to the background:
+
+```kotlin
+class AnalyticsLifecycle(
+    private val analytics: Pulsepond,
+) : DefaultLifecycleObserver {
+    override fun onStop(owner: LifecycleOwner) {
+        analytics.requestFlush()
+    }
+}
+```
+
+Register the observer with your application lifecycle, for example `ProcessLifecycleOwner`. Pulsepond does not register lifecycle observers itself and does not start a background service.
+
 ## iOS
 
 Download `Pulsepond.xcframework.zip` from a release, verify the published SHA-256 checksum, unpack it, and add `Pulsepond.xcframework` to the Xcode target under **Frameworks, Libraries, and Embedded Content**.
@@ -89,6 +103,16 @@ try analytics.track(
 ```
 
 Validation failures cross the generated Objective-C boundary as Swift errors. Configuration, property setters, and tracking use `try`; creation, flush, reset, and shutdown use `try await`. A real Swift consumer is type-checked against the release XCFramework on macOS CI. A hand-written convenience façade and Swift Package Manager distribution are planned before the first stable release.
+
+Call the non-blocking lifecycle method from an application or scene background callback:
+
+```swift
+func applicationDidEnterBackground(_ application: UIApplication) {
+    analytics?.requestFlush()
+}
+```
+
+`requestFlush()` coalesces repeated requests and returns immediately. It does not extend the operating system's background execution window; anything not delivered remains in app-private storage for the next launch. Use `try await analytics.flush()` when your code must wait for the attempt to finish.
 
 ## Contract and delivery
 

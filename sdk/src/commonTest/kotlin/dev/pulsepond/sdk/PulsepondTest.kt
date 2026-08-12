@@ -126,6 +126,89 @@ class PulsepondTest {
     }
 
     @Test
+    fun lifecycleFlushRequestsAreNonBlockingAndCoalesced() = runTest {
+        val transport = FakeTransport(FakeOutcome.Response(202))
+        val client = client(
+            transport = transport,
+            flushIntervalMilliseconds = 0,
+            coroutineScope = this,
+        )
+        client.track("backgrounded")
+
+        client.requestFlush()
+        client.requestFlush()
+        assertTrue(transport.bodies.isEmpty())
+        advanceUntilIdle()
+
+        assertEquals(listOf("backgrounded"), transport.bodies.map(::eventName))
+        assertEquals(0, client.pendingEventCount())
+        client.shutdown()
+        client.requestFlush()
+        advanceUntilIdle()
+        assertEquals(1, transport.bodies.size)
+    }
+
+    @Test
+    fun lifecycleFlushRequestRetriesAnExplicitlyDeferredQueue() = runTest {
+        val transport = FakeTransport(
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Response(202),
+        )
+        val client = client(
+            transport = transport,
+            flushIntervalMilliseconds = 0,
+            coroutineScope = this,
+        )
+        client.track("deferred")
+        client.flush()
+        assertEquals(1, client.pendingEventCount())
+
+        client.requestFlush()
+        advanceUntilIdle()
+
+        assertEquals(0, client.pendingEventCount())
+        assertEquals(7, transport.bodies.size)
+        client.shutdown()
+    }
+
+    @Test
+    fun lifecycleFlushRequestDuringRetryExhaustionSchedulesOneFollowUp() = runTest {
+        val transport = FakeTransport(
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Response(202),
+        )
+        lateinit var client: Pulsepond
+        client = client(
+            transport = transport,
+            batchSize = 1,
+            flushIntervalMilliseconds = 0,
+            coroutineScope = this,
+            diagnosticListener = PulsepondDiagnosticListener { diagnostic ->
+                if (diagnostic.code == PulsepondDiagnosticCode.RetryExhausted) {
+                    client.requestFlush()
+                }
+            },
+        )
+
+        client.track("retry_from_callback")
+        advanceUntilIdle()
+
+        assertEquals(7, transport.bodies.size)
+        assertEquals(0, client.pendingEventCount())
+        client.shutdown()
+    }
+
+    @Test
     fun boundedQueueFailsClosedAndEmitsOnlyRedactedDiagnostics() = runTest {
         val transport = FakeTransport(FakeOutcome.Response(202))
         val diagnostics = mutableListOf<PulsepondDiagnostic>()
@@ -730,6 +813,7 @@ private fun client(
     flushIntervalMilliseconds: Long = 0,
     coroutineScope: kotlinx.coroutines.CoroutineScope? = null,
     persistence: EventPersistence = VolatileEventPersistence,
+    diagnosticListener: PulsepondDiagnosticListener? = null,
 ): Pulsepond {
     var now = 1_800_000_000_000L
     var randomByte = 0
@@ -744,7 +828,7 @@ private fun client(
             batchSize = batchSize,
             flushIntervalMilliseconds = flushIntervalMilliseconds,
             maxQueueSize = maxQueueSize,
-            diagnosticListener = PulsepondDiagnosticListener { diagnostic ->
+            diagnosticListener = diagnosticListener ?: PulsepondDiagnosticListener { diagnostic ->
                 diagnostics += diagnostic
             },
         ),
