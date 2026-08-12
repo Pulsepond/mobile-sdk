@@ -1,7 +1,7 @@
 package dev.pulsepond.sdk
 
-private const val maxSafeInteger: Long = 9_007_199_254_740_991
-private const val maxProperties: Int = 32
+internal const val maxSafeInteger: Long = 9_007_199_254_740_991
+internal const val maxProperties: Int = 32
 
 internal sealed interface EventPropertyValue {
     data class Text(val value: String) : EventPropertyValue

@@ -7,3 +7,7 @@ public class PulsepondConfigurationException public constructor(message: String)
 /** Raised when an event does not satisfy the closed Pulsepond v1 contract. */
 public class PulsepondValidationException public constructor(message: String) :
     IllegalArgumentException(message)
+
+/** Raised when durable SDK state cannot be initialized or updated safely. */
+public class PulsepondStorageException public constructor(message: String) :
+    IllegalStateException(message)

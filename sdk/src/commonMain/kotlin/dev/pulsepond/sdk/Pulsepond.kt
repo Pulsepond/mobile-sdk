@@ -34,6 +34,11 @@ private data class QueuedEvent(
     val serializedBytes: Int,
 )
 
+private data class QueueMutation(
+    val eventCount: Int,
+    val storageFailed: Boolean,
+)
+
 private data class Batch(
     val events: List<QueuedEvent>,
     val body: String,
@@ -64,41 +69,84 @@ private sealed interface TransportAttempt {
 /**
  * Sends explicit product events to one source-scoped Pulsepond ingestion endpoint.
  *
- * Events and identifiers are memory-only in 0.1. Call [shutdown] from the host application's
- * lifecycle when a final best-effort flush is appropriate.
+ * Construct this client through the platform factory so identity and unsent events use
+ * app-private durable storage.
  */
 public class Pulsepond internal constructor(
     private val configuration: PulsepondConfiguration,
     private val transport: EventTransport,
     private val nowMilliseconds: () -> Long,
     private val randomBytes: (ByteArray) -> Unit,
+    private val persistence: EventPersistence = VolatileEventPersistence,
     coroutineScope: CoroutineScope? = null,
 ) {
-    @Throws(PulsepondConfigurationException::class)
-    public constructor(configuration: PulsepondConfiguration) : this(
-        configuration = configuration,
-        transport = KtorEventTransport(configuration),
-        nowMilliseconds = { Clock.System.now().toEpochMilliseconds() },
-        randomBytes = ::fillSecureRandom,
-        coroutineScope = null,
-    )
-
     private val stateLock: SynchronizedObject = SynchronizedObject()
     private val flushLock: Mutex = Mutex()
     private val ownsScope: Boolean = coroutineScope == null
     private val scope: CoroutineScope =
         coroutineScope ?: CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val queue: MutableList<QueuedEvent> = mutableListOf()
-    private val identity: IdentityManager = IdentityManager(randomBytes, nowMilliseconds())
-    private var queueBytes: Int = 0
+    private val startupTimeMilliseconds: Long = nowMilliseconds()
+    private val persistedState: PersistedState = persistence.load {
+        createUuidV7(startupTimeMilliseconds, randomBytes)
+    }
+    private val queue: MutableList<QueuedEvent> = mutableListOf<QueuedEvent>().apply {
+        var restoredBytes = 0
+        for (event in persistedState.events) {
+            val serializedBytes = event.json().toString().encodeToByteArray().size
+            if (
+                size >= configuration.maxQueueSize ||
+                restoredBytes + serializedBytes > maxQueueBytes ||
+                event.environment != configuration.environment
+            ) {
+                continue
+            }
+            add(QueuedEvent(event, serializedBytes))
+            restoredBytes += serializedBytes
+        }
+    }
+    private val identity: IdentityManager = IdentityManager(
+        randomBytes,
+        startupTimeMilliseconds,
+        persistedState.installationId,
+    )
+    private var queueBytes: Int = queue.sumOf(QueuedEvent::serializedBytes)
     private var generation: Long = 0
     private var generationInvalidation: CompletableDeferred<Unit> = CompletableDeferred()
     private var effectiveBatchSize: Int = configuration.batchSize
     private var automaticFlushScheduled: Boolean = false
     private var immediateFlushScheduled: Boolean = false
+    private var deliveryDeferred: Boolean = false
     private var closing: Boolean = false
     private var closed: Boolean = false
     private var shutdownCompletion: CompletableDeferred<Unit>? = null
+
+    init {
+        val discardedRecords = persistedState.events.size - queue.size
+        if (discardedRecords > 0) {
+            try {
+                persistence.replace(queue.map(QueuedEvent::event))
+            } catch (_: PulsepondStorageException) {
+                notifyStorageFailure()
+            }
+        }
+        val recoveredRecords = persistedState.recoveredRecords + discardedRecords
+        if (recoveredRecords > 0) {
+            notify(
+                PulsepondDiagnostic(
+                    code = PulsepondDiagnosticCode.StorageRecovered,
+                    droppedEvents = recoveredRecords,
+                    retryable = false,
+                ),
+            )
+        }
+        if (queue.size >= effectiveBatchSize) {
+            immediateFlushScheduled = true
+            scheduleImmediateFlush()
+        } else if (queue.isNotEmpty() && configuration.flushIntervalMilliseconds > 0) {
+            automaticFlushScheduled = true
+            scheduleTimedFlush()
+        }
+    }
 
     /** Enqueues an event and returns its UUIDv7, or null when the bounded queue is full. */
     @Throws(PulsepondValidationException::class, PulsepondConfigurationException::class)
@@ -113,6 +161,7 @@ public class Pulsepond internal constructor(
         val now = nowMilliseconds()
         var requestTimedFlush = false
         var requestImmediateFlush = false
+        var storageFailed = false
         val eventId = synchronized(stateLock) {
             if (closing || closed) {
                 throw PulsepondValidationException(
@@ -141,8 +190,14 @@ public class Pulsepond internal constructor(
                 if (queueBytes + serializedBytes > maxQueueBytes) {
                     null
                 } else {
+                    try {
+                        persistence.append(event)
+                    } catch (_: PulsepondStorageException) {
+                        storageFailed = true
+                    }
                     queue += QueuedEvent(event, serializedBytes)
                     queueBytes += serializedBytes
+                    deliveryDeferred = false
                     if (queue.size >= effectiveBatchSize) {
                         if (!immediateFlushScheduled) {
                             immediateFlushScheduled = true
@@ -169,6 +224,7 @@ public class Pulsepond internal constructor(
             )
             return null
         }
+        if (storageFailed) notifyStorageFailure()
         if (requestImmediateFlush) scheduleImmediateFlush()
         if (requestTimedFlush) scheduleTimedFlush()
         return eventId
@@ -177,13 +233,18 @@ public class Pulsepond internal constructor(
     /** Attempts to deliver every event that can be processed within bounded batches. */
     @Throws(CancellationException::class)
     public suspend fun flush(): Unit = flushLock.withLock {
-        if (synchronized(stateLock) { closed }) return@withLock
+        val isClosed = synchronized(stateLock) {
+            if (!closed) deliveryDeferred = false
+            closed
+        }
+        if (isClosed) return@withLock
         val staleEvents = dropStaleEvents()
-        if (staleEvents > 0) {
+        if (staleEvents.storageFailed) notifyStorageFailure()
+        if (staleEvents.eventCount > 0) {
             notify(
                 PulsepondDiagnostic(
                     code = PulsepondDiagnosticCode.StaleEvent,
-                    droppedEvents = staleEvents,
+                    droppedEvents = staleEvents.eventCount,
                     retryable = false,
                 ),
             )
@@ -191,14 +252,16 @@ public class Pulsepond internal constructor(
         repeat(maxBatchesPerFlush) {
             val batch = nextBatch() ?: return@withLock
             when (val result = deliver(batch)) {
-                DeliveryResult.Accepted -> removeBatch(batch)
+                DeliveryResult.Accepted -> {
+                    if (removeBatch(batch)) notifyStorageFailure()
+                }
                 DeliveryResult.TooLarge -> {
                     if (batch.events.size > 1) {
                         synchronized(stateLock) {
                             effectiveBatchSize = maxOf(1, batch.events.size / 2)
                         }
                     } else {
-                        removeBatch(batch)
+                        val storageFailed = removeBatch(batch)
                         notify(
                             PulsepondDiagnostic(
                                 code = PulsepondDiagnosticCode.BatchRejected,
@@ -207,10 +270,11 @@ public class Pulsepond internal constructor(
                                 status = 413,
                             ),
                         )
+                        if (storageFailed) notifyStorageFailure()
                     }
                 }
                 is DeliveryResult.Rejected -> {
-                    removeBatch(batch)
+                    val storageFailed = removeBatch(batch)
                     notify(
                         PulsepondDiagnostic(
                             code = PulsepondDiagnosticCode.BatchRejected,
@@ -219,35 +283,40 @@ public class Pulsepond internal constructor(
                             status = result.status,
                         ),
                     )
+                    if (storageFailed) notifyStorageFailure()
                 }
                 DeliveryResult.RetryExhausted -> {
-                    removeBatch(batch)
+                    synchronized(stateLock) { deliveryDeferred = true }
                     notify(
                         PulsepondDiagnostic(
                             code = PulsepondDiagnosticCode.RetryExhausted,
-                            droppedEvents = batch.events.size,
-                            retryable = false,
+                            droppedEvents = 0,
+                            retryable = true,
                         ),
                     )
+                    return@withLock
                 }
                 DeliveryResult.Invalidated -> Unit
             }
         }
     }
 
-    /** Discards unsent events and rotates the in-memory installation and session identifiers. */
-    @Throws(PulsepondConfigurationException::class)
+    /** Discards unsent events and atomically rotates the installation and session identifiers. */
+    @Throws(PulsepondConfigurationException::class, PulsepondStorageException::class)
     public fun reset() {
         val now = nowMilliseconds()
+        val newInstallationId = createUuidV7(now, randomBytes)
         synchronized(stateLock) {
             if (closed) return
+            persistence.reset(newInstallationId)
             generationInvalidation.complete(Unit)
             generation += 1
             generationInvalidation = CompletableDeferred()
             queue.clear()
             queueBytes = 0
             effectiveBatchSize = configuration.batchSize
-            identity.reset(now)
+            deliveryDeferred = false
+            identity.reset(now, newInstallationId)
         }
     }
 
@@ -288,7 +357,7 @@ public class Pulsepond internal constructor(
                     closing = false
                     count
                 }
-                if (droppedEvents > 0) {
+                if (droppedEvents > 0 && !persistence.isDurable) {
                     notify(
                         PulsepondDiagnostic(
                             code = PulsepondDiagnosticCode.DeliveryFailed,
@@ -317,7 +386,12 @@ public class Pulsepond internal constructor(
             } finally {
                 val flushAgain = synchronized(stateLock) {
                     immediateFlushScheduled = false
-                    if (queue.size >= effectiveBatchSize && !closing && !closed) {
+                    if (
+                        queue.size >= effectiveBatchSize &&
+                        !deliveryDeferred &&
+                        !closing &&
+                        !closed
+                    ) {
                         immediateFlushScheduled = true
                         true
                     } else {
@@ -340,6 +414,7 @@ public class Pulsepond internal constructor(
                     if (
                         queue.isNotEmpty() &&
                         queue.size < effectiveBatchSize &&
+                        !deliveryDeferred &&
                         !closing &&
                         !closed
                     ) {
@@ -376,7 +451,7 @@ public class Pulsepond internal constructor(
         }
     }
 
-    private fun dropStaleEvents(): Int = synchronized(stateLock) {
+    private fun dropStaleEvents(): QueueMutation = synchronized(stateLock) {
         val cutoff = nowMilliseconds() - configuration.eventTtlMilliseconds
         var dropped = 0
         val iterator = queue.iterator()
@@ -388,7 +463,15 @@ public class Pulsepond internal constructor(
                 dropped += 1
             }
         }
-        dropped
+        var storageFailed = false
+        if (dropped > 0) {
+            try {
+                persistence.replace(queue.map(QueuedEvent::event))
+            } catch (_: PulsepondStorageException) {
+                storageFailed = true
+            }
+        }
+        QueueMutation(dropped, storageFailed)
     }
 
     private fun nextBatch(): Batch? = synchronized(stateLock) {
@@ -501,14 +584,20 @@ public class Pulsepond internal constructor(
         return value.toLong() * ceiling / 0xffff
     }
 
-    private fun removeBatch(batch: Batch) {
+    private fun removeBatch(batch: Batch): Boolean {
         synchronized(stateLock) {
-            if (batch.generation != generation || queue.size < batch.events.size) return
+            if (batch.generation != generation || queue.size < batch.events.size) return false
             val expectedIds = batch.events.map { it.event.eventId }
             val actualIds = queue.take(expectedIds.size).map { it.event.eventId }
-            if (expectedIds != actualIds) return
+            if (expectedIds != actualIds) return false
             repeat(batch.events.size) {
                 queueBytes -= queue.removeAt(0).serializedBytes
+            }
+            return try {
+                persistence.replace(queue.map(QueuedEvent::event))
+                false
+            } catch (_: PulsepondStorageException) {
+                true
             }
         }
     }
@@ -520,4 +609,26 @@ public class Pulsepond internal constructor(
             // Consumer callbacks cannot break delivery or receive event data.
         }
     }
+
+    private fun notifyStorageFailure() {
+        notify(
+            PulsepondDiagnostic(
+                code = PulsepondDiagnosticCode.StorageFailed,
+                droppedEvents = 0,
+                retryable = true,
+            ),
+        )
+    }
 }
+
+internal fun createPersistentPulsepond(
+    configuration: PulsepondConfiguration,
+    persistence: EventPersistence,
+): Pulsepond = Pulsepond(
+    configuration = configuration,
+    transport = KtorEventTransport(configuration),
+    nowMilliseconds = { Clock.System.now().toEpochMilliseconds() },
+    randomBytes = ::fillSecureRandom,
+    persistence = persistence,
+    coroutineScope = null,
+)

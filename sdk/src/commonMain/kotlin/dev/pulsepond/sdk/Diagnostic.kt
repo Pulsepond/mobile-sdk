@@ -7,6 +7,8 @@ public enum class PulsepondDiagnosticCode(public val wireName: String) {
     QueueFull("queue_full"),
     RetryExhausted("retry_exhausted"),
     StaleEvent("stale_event"),
+    StorageFailed("storage_failed"),
+    StorageRecovered("storage_recovered"),
 }
 
 /** A diagnostic never includes a write key, event payload, or property value. */

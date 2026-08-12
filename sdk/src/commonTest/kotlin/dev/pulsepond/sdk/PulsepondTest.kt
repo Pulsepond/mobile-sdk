@@ -13,6 +13,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okio.Path.Companion.toPath
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -157,6 +158,124 @@ class PulsepondTest {
     }
 
     @Test
+    fun aPersistedEventSurvivesClientRecreationAndIsRemovedAfterAcceptance() = runTest {
+        val fileSystem = okio.fakefilesystem.FakeFileSystem()
+        val directory = "/pulsepond/integration".toPath()
+        val first = client(
+            transport = FakeTransport(),
+            persistence = FileEventPersistence(fileSystem, directory),
+            coroutineScope = this,
+        )
+        first.track("offline_event")
+
+        val delivery = FakeTransport(FakeOutcome.Response(202))
+        val restored = client(
+            transport = delivery,
+            persistence = FileEventPersistence(fileSystem, directory),
+            coroutineScope = this,
+        )
+        assertEquals(1, restored.pendingEventCount())
+        restored.flush()
+
+        assertEquals("offline_event", eventName(delivery.bodies.single()))
+        val afterDelivery = client(
+            transport = FakeTransport(),
+            persistence = FileEventPersistence(fileSystem, directory),
+            coroutineScope = this,
+        )
+        assertEquals(0, afterDelivery.pendingEventCount())
+        restored.shutdown()
+        afterDelivery.shutdown()
+        first.reset()
+        first.shutdown()
+        fileSystem.checkNoOpenFiles()
+    }
+
+    @Test
+    fun appendFailureKeepsTheEventInMemoryAndEmitsARedactedDiagnostic() = runTest {
+        val diagnostics = mutableListOf<PulsepondDiagnostic>()
+        val transport = FakeTransport(FakeOutcome.Response(202))
+        val client = client(
+            transport = transport,
+            diagnostics = diagnostics,
+            persistence = FailingPersistence(failAppend = true),
+        )
+
+        client.track("app_open")
+        client.flush()
+
+        assertEquals("app_open", eventName(transport.bodies.single()))
+        assertEquals(PulsepondDiagnosticCode.StorageFailed, diagnostics.single().code)
+        assertEquals(0, diagnostics.single().droppedEvents)
+        client.shutdown()
+    }
+
+    @Test
+    fun failedDurableResetLeavesTheCurrentQueueAndIdentityUntouched() = runTest {
+        val transport = FakeTransport(FakeOutcome.Response(202))
+        val client = client(
+            transport = transport,
+            persistence = FailingPersistence(failReset = true),
+        )
+        client.track("before_reset")
+
+        assertFailsWith<PulsepondStorageException> { client.reset() }
+        client.track("after_failed_reset")
+        client.flush()
+
+        val events = Json.parseToJsonElement(transport.bodies.single())
+            .jsonObject["events"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("before_reset", "after_failed_reset"), events.map {
+            it["event_name"]!!.jsonPrimitive.content
+        })
+        assertEquals(1, events.map {
+            it["anonymous_installation_id"]!!.jsonPrimitive.content
+        }.distinct().size)
+        client.shutdown()
+    }
+
+    @Test
+    fun retryExhaustionDefersRatherThanDropsTheDurableQueue() = runTest {
+        val fileSystem = okio.fakefilesystem.FakeFileSystem()
+        val directory = "/pulsepond/retry".toPath()
+        val diagnostics = mutableListOf<PulsepondDiagnostic>()
+        val client = client(
+            transport = FakeTransport(
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+            ),
+            diagnostics = diagnostics,
+            persistence = FileEventPersistence(fileSystem, directory),
+            coroutineScope = this,
+        )
+        client.track("offline_event")
+
+        client.flush()
+
+        assertEquals(1, client.pendingEventCount())
+        val exhausted = diagnostics.last()
+        assertEquals(PulsepondDiagnosticCode.RetryExhausted, exhausted.code)
+        assertEquals(0, exhausted.droppedEvents)
+        assertTrue(exhausted.retryable)
+        val delivery = FakeTransport(FakeOutcome.Response(202))
+        val restored = client(
+            transport = delivery,
+            persistence = FileEventPersistence(fileSystem, directory),
+            coroutineScope = this,
+        )
+        restored.flush()
+        assertEquals("offline_event", eventName(delivery.bodies.single()))
+        restored.shutdown()
+        client.reset()
+        client.shutdown()
+        fileSystem.checkNoOpenFiles()
+    }
+
+    @Test
     fun resetCancelsAnInFlightBodyAndNeverRetriesIt() = runTest {
         val transport = ResetAwareTransport()
         val client = client(transport)
@@ -253,6 +372,37 @@ private class BlockingTransport : RecordingTransport() {
     }
 }
 
+private class FailingPersistence(
+    private val failAppend: Boolean = false,
+    private val failReset: Boolean = false,
+) : EventPersistence {
+    override val isDurable: Boolean = true
+
+    private var installationId: String? = null
+    private val events: MutableList<EventRecord> = mutableListOf()
+
+    override fun load(newInstallationId: () -> String): PersistedState {
+        val activeId = installationId ?: newInstallationId().also { installationId = it }
+        return PersistedState(activeId, events.toList())
+    }
+
+    override fun append(event: EventRecord) {
+        if (failAppend) throw PulsepondStorageException("test append failure")
+        events += event
+    }
+
+    override fun replace(events: List<EventRecord>) {
+        this.events.clear()
+        this.events += events
+    }
+
+    override fun reset(newInstallationId: String) {
+        if (failReset) throw PulsepondStorageException("test reset failure")
+        installationId = newInstallationId
+        events.clear()
+    }
+}
+
 private fun client(
     transport: EventTransport,
     diagnostics: MutableList<PulsepondDiagnostic> = mutableListOf(),
@@ -260,6 +410,7 @@ private fun client(
     maxQueueSize: Int = 1_000,
     flushIntervalMilliseconds: Long = 0,
     coroutineScope: kotlinx.coroutines.CoroutineScope? = null,
+    persistence: EventPersistence = VolatileEventPersistence,
 ): Pulsepond {
     var now = 1_800_000_000_000L
     var randomByte = 0
@@ -283,6 +434,7 @@ private fun client(
                 randomByte = (randomByte + 1) and 0xff
             }
         },
+        persistence = persistence,
         coroutineScope = coroutineScope,
     )
 }

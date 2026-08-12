@@ -45,11 +45,13 @@ kotlin {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.ktor.client.core)
+            implementation(libs.okio)
         }
 
         commonTest.dependencies {
             implementation(libs.kotlinx.coroutines.test)
             implementation(libs.kotlin.test)
+            implementation(libs.okio.fakefilesystem)
         }
 
         androidMain.dependencies {

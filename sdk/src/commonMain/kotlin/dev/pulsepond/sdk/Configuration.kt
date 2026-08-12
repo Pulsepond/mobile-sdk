@@ -56,6 +56,12 @@ public constructor(
     }
 }
 
+internal val PulsepondConfiguration.storageNamespace: String
+    get() {
+        val sourceId = writeKey.removePrefix("ppw_v1_").substringBefore('_')
+        return "$sourceId/$environment"
+    }
+
 private fun validateEndpoint(value: String): Url {
     val url = try {
         Url(value)

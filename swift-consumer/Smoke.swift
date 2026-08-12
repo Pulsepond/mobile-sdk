@@ -23,7 +23,7 @@ func makePulsepondClient() throws -> Pulsepond {
     let properties = try PulsepondProperties()
         .setString(key: "work_id", value: "work_123")
         .setBoolean(key: "completed", value: false)
-    let client = try Pulsepond(configuration: configuration)
+    let client = try PulsepondApple.shared.create(configuration: configuration)
     _ = try client.track(eventName: "view_work", properties: properties)
     return client
 }

@@ -27,11 +27,12 @@ dependencies {
 ```
 
 ```kotlin
-import dev.pulsepond.sdk.Pulsepond
+import dev.pulsepond.sdk.PulsepondAndroid
 import dev.pulsepond.sdk.PulsepondConfiguration
 import dev.pulsepond.sdk.PulsepondProperties
 
-val analytics = Pulsepond(
+val analytics = PulsepondAndroid.create(
+    applicationContext,
     PulsepondConfiguration(
         endpoint = "https://pulsepond.example.com/v1/batch",
         writeKey = "ppw_v1_...",
@@ -56,20 +57,19 @@ Download `Pulsepond.xcframework.zip` from a release, verify the published SHA-25
 ```swift
 import Pulsepond
 
-let analytics = try Pulsepond(
-    configuration: try PulsepondConfiguration(
-        endpoint: "https://pulsepond.example.com/v1/batch",
-        writeKey: "ppw_v1_...",
-        environment: "production",
-        appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-        release: "ios@1.0.0",
-        batchSize: 20,
-        flushIntervalMilliseconds: 5_000,
-        maxQueueSize: 1_000,
-        eventTtlMilliseconds: 82_800_000,
-        diagnosticListener: nil
-    )
+let configuration = try PulsepondConfiguration(
+    endpoint: "https://pulsepond.example.com/v1/batch",
+    writeKey: "ppw_v1_...",
+    environment: "production",
+    appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+    release: "ios@1.0.0",
+    batchSize: 20,
+    flushIntervalMilliseconds: 5_000,
+    maxQueueSize: 1_000,
+    eventTtlMilliseconds: 82_800_000,
+    diagnosticListener: nil
 )
+let analytics = try PulsepondApple.shared.create(configuration: configuration)
 
 try analytics.track(
     eventName: "view_work",
@@ -84,12 +84,13 @@ Validation failures cross the generated Objective-C boundary as Swift errors, so
 - Events are posted only to the configured HTTPS URL with the exact `/v1/batch` path. Plain HTTP is accepted only for loopback development.
 - Every event receives a UUIDv7 `event_id`, UTC `occurred_at`, platform, environment, anonymous installation ID, and session ID.
 - Properties are flat and intentionally closed to strings, safe integers, booleans, and null. Names and values are bounded before enqueueing.
-- Queues, batches, retry counts, retry delays, and event age are bounded. A 413 response splits a batch without changing event IDs.
+- Queues, batches, retry counts, retry delays, event age, and on-disk journal size are bounded. A 413 response splits a batch without changing event IDs.
+- Android and Apple factories persist the installation identity and unsent queue in app-private storage, isolated by source and environment. Accepted event IDs may be replayed after a storage write failure, so the server remains responsible for idempotent ingestion.
 - A batch body is frozen before its first attempt and remains byte-identical across retries.
 - HTTP 202 is the only success response. Network errors, 408, 429, and 5xx responses retry with bounded jitter. Other 4xx responses are terminal.
 - Diagnostics never contain event payloads, property values, endpoint query data, or credentials.
 
-The current pre-1.0 implementation keeps its queue and anonymous identity in memory. It cannot guarantee delivery after process termination or calculate installation retention across separate launches yet. Durable platform storage is the next compatibility boundary and will land before a stable release.
+Create clients with `PulsepondAndroid.create` or `PulsepondApple.shared.create`; both select the durable platform implementation.
 
 See [Architecture](docs/ARCHITECTURE.md) for the design constraints and [Contributing](CONTRIBUTING.md) for local verification.
 

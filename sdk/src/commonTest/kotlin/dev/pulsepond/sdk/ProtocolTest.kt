@@ -7,6 +7,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ProtocolTest {
@@ -15,6 +16,9 @@ class ProtocolTest {
         val uuid = createUuidV7(0x010203040506) { bytes -> bytes.fill(0) }
 
         assertEquals("01020304-0506-7000-8000-000000000000", uuid)
+        assertTrue(isUuidV7(uuid))
+        assertFalse(isUuidV7("-1020304-0506-7000-8000-000000000000"))
+        assertFalse(isUuidV7("01020304-0506-7000-7000-000000000000"))
     }
 
     @Test
@@ -67,6 +71,10 @@ class ProtocolTest {
             environment = "production",
         )
         assertEquals("events.example.com", valid.parsedEndpoint.host)
+        assertEquals(
+            "0123456789abcdef0123456789abcdef/production",
+            valid.storageNamespace,
+        )
 
         for (endpoint in listOf(
             "http://events.example.com/v1/batch",

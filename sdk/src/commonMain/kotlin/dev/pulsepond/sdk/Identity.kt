@@ -10,8 +10,9 @@ internal data class Identity(
 internal class IdentityManager(
     private val random: (ByteArray) -> Unit,
     nowMilliseconds: Long,
+    installationId: String = createUuidV7(nowMilliseconds, random),
 ) {
-    private var anonymousInstallationId: String = createUuidV7(nowMilliseconds, random)
+    private var anonymousInstallationId: String = installationId
     private var sessionId: String = createUuidV7(nowMilliseconds, random)
     private var lastActivityMilliseconds: Long = nowMilliseconds
 
@@ -26,8 +27,8 @@ internal class IdentityManager(
         return Identity(anonymousInstallationId, sessionId)
     }
 
-    fun reset(nowMilliseconds: Long) {
-        anonymousInstallationId = createUuidV7(nowMilliseconds, random)
+    fun reset(nowMilliseconds: Long, installationId: String = createUuidV7(nowMilliseconds, random)) {
+        anonymousInstallationId = installationId
         sessionId = createUuidV7(nowMilliseconds, random)
         lastActivityMilliseconds = nowMilliseconds
     }

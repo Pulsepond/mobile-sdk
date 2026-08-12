@@ -1,10 +1,17 @@
 package dev.pulsepond.sdk
 
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlin.time.Instant
 
 internal const val eventSchemaVersion: Int = 1
@@ -55,6 +62,80 @@ internal fun eventBatchJson(events: List<EventRecord>): String =
     buildJsonObject {
         put("events", JsonArray(events.map(EventRecord::json)))
     }.toString()
+
+internal fun parsePersistedEvent(value: String): EventRecord? = runCatching {
+    val json = Json.parseToJsonElement(value).jsonObject
+    if (json["schema_version"]?.jsonPrimitive?.intOrNull != eventSchemaVersion) return null
+    val occurredAt = json.requiredString("occurred_at")
+    val occurredAtMilliseconds = Instant.parse(occurredAt).toEpochMilliseconds()
+    if (occurredAt(occurredAtMilliseconds) != occurredAt) error("occurred_at must be canonical")
+    val properties = json["properties"]?.jsonObject?.entries?.associateTo(linkedMapOf()) {
+        (key, element) ->
+        validateSlug("property name", key, 64)
+        val primitive = element as? JsonPrimitive ?: error("property must be scalar")
+        key to when {
+            primitive === JsonNull -> EventPropertyValue.Null
+            primitive.isString -> EventPropertyValue.Text(primitive.content).also {
+                validatePrintableText("string property", primitive.content, 256)
+            }
+            primitive.booleanOrNull != null -> EventPropertyValue.Flag(primitive.booleanOrNull!!)
+            primitive.longOrNull != null -> EventPropertyValue.Integer(primitive.longOrNull!!).also {
+                if (primitive.longOrNull!! !in -maxSafeInteger..maxSafeInteger) {
+                    error("numeric property must be a safe integer")
+                }
+            }
+            else -> error("property must use a supported scalar")
+        }
+    } ?: error("properties are required")
+    if (properties.size > maxProperties) error("too many properties")
+    val eventId = json.requiredString("event_id")
+    val eventName = json.requiredString("event_name")
+    val platform = json.requiredString("platform")
+    val appVersion = json.optionalString("app_version")
+    val release = json.optionalString("release")
+    val environment = json.requiredString("environment")
+    val anonymousInstallationId = json.requiredString("anonymous_installation_id")
+    val sessionId = json.requiredString("session_id")
+    if (!isUuidV7(eventId) || !isUuidV7(anonymousInstallationId) || !isUuidV7(sessionId)) {
+        error("identifiers must be UUIDv7")
+    }
+    validateSlug("eventName", eventName, 64)
+    if (platform !in setOf("android", "ios", "web", "server", "other")) {
+        error("platform is invalid")
+    }
+    validateOptionalText("appVersion", appVersion, 64)
+    validateOptionalText("release", release, 128)
+    validateSlug("environment", environment, 32)
+    EventRecord(
+        eventId = eventId,
+        eventName = eventName,
+        occurredAtMilliseconds = occurredAtMilliseconds,
+        occurredAt = occurredAt,
+        platform = platform,
+        appVersion = appVersion,
+        release = release,
+        environment = environment,
+        anonymousInstallationId = anonymousInstallationId,
+        sessionId = sessionId,
+        properties = properties,
+    )
+}.getOrNull()
+
+private fun JsonObject.requiredString(name: String): String =
+    this[name]?.jsonPrimitive?.contentOrNull ?: error("$name is required")
+
+private fun JsonObject.optionalString(name: String): String? =
+    this[name]?.jsonPrimitive?.contentOrNull
+
+internal fun isUuidV7(value: String): Boolean =
+    value.length == 36 && value[14] == '7' && value[19].lowercaseChar() in "89ab" &&
+        value.withIndex().all { (index, character) ->
+            if (index == 8 || index == 13 || index == 18 || index == 23) {
+                character == '-'
+            } else {
+                character.lowercaseChar() in '0'..'9' || character.lowercaseChar() in 'a'..'f'
+            }
+        }
 
 internal fun createUuidV7(timestampMilliseconds: Long, random: (ByteArray) -> Unit): String {
     if (timestampMilliseconds !in 0..0xffffffffffffL) {

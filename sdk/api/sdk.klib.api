@@ -12,6 +12,8 @@ final enum class dev.pulsepond.sdk/PulsepondDiagnosticCode : kotlin/Enum<dev.pul
     enum entry QueueFull // dev.pulsepond.sdk/PulsepondDiagnosticCode.QueueFull|null[0]
     enum entry RetryExhausted // dev.pulsepond.sdk/PulsepondDiagnosticCode.RetryExhausted|null[0]
     enum entry StaleEvent // dev.pulsepond.sdk/PulsepondDiagnosticCode.StaleEvent|null[0]
+    enum entry StorageFailed // dev.pulsepond.sdk/PulsepondDiagnosticCode.StorageFailed|null[0]
+    enum entry StorageRecovered // dev.pulsepond.sdk/PulsepondDiagnosticCode.StorageRecovered|null[0]
 
     final val entries // dev.pulsepond.sdk/PulsepondDiagnosticCode.entries|#static{}entries[0]
         final fun <get-entries>(): kotlin.enums/EnumEntries<dev.pulsepond.sdk/PulsepondDiagnosticCode> // dev.pulsepond.sdk/PulsepondDiagnosticCode.entries.<get-entries>|<get-entries>#static(){}[0]
@@ -27,8 +29,6 @@ abstract fun interface dev.pulsepond.sdk/PulsepondDiagnosticListener { // dev.pu
 }
 
 final class dev.pulsepond.sdk/Pulsepond { // dev.pulsepond.sdk/Pulsepond|null[0]
-    constructor <init>(dev.pulsepond.sdk/PulsepondConfiguration) // dev.pulsepond.sdk/Pulsepond.<init>|<init>(dev.pulsepond.sdk.PulsepondConfiguration){}[0]
-
     final fun reset() // dev.pulsepond.sdk/Pulsepond.reset|reset(){}[0]
     final fun track(kotlin/String): kotlin/String? // dev.pulsepond.sdk/Pulsepond.track|track(kotlin.String){}[0]
     final fun track(kotlin/String, dev.pulsepond.sdk/PulsepondProperties?): kotlin/String? // dev.pulsepond.sdk/Pulsepond.track|track(kotlin.String;dev.pulsepond.sdk.PulsepondProperties?){}[0]
@@ -89,6 +89,14 @@ final class dev.pulsepond.sdk/PulsepondProperties { // dev.pulsepond.sdk/Pulsepo
     final fun setString(kotlin/String, kotlin/String): dev.pulsepond.sdk/PulsepondProperties // dev.pulsepond.sdk/PulsepondProperties.setString|setString(kotlin.String;kotlin.String){}[0]
 }
 
+final class dev.pulsepond.sdk/PulsepondStorageException : kotlin/IllegalStateException { // dev.pulsepond.sdk/PulsepondStorageException|null[0]
+    constructor <init>(kotlin/String) // dev.pulsepond.sdk/PulsepondStorageException.<init>|<init>(kotlin.String){}[0]
+}
+
 final class dev.pulsepond.sdk/PulsepondValidationException : kotlin/IllegalArgumentException { // dev.pulsepond.sdk/PulsepondValidationException|null[0]
     constructor <init>(kotlin/String) // dev.pulsepond.sdk/PulsepondValidationException.<init>|<init>(kotlin.String){}[0]
+}
+
+final object dev.pulsepond.sdk/PulsepondApple { // dev.pulsepond.sdk/PulsepondApple|null[0]
+    final fun create(dev.pulsepond.sdk/PulsepondConfiguration): dev.pulsepond.sdk/Pulsepond // dev.pulsepond.sdk/PulsepondApple.create|create(dev.pulsepond.sdk.PulsepondConfiguration){}[0]
 }
