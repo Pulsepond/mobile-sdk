@@ -126,6 +126,57 @@ class PulsepondTest {
     }
 
     @Test
+    fun lifecycleFlushRequestsAreNonBlockingAndCoalesced() = runTest {
+        val transport = FakeTransport(FakeOutcome.Response(202))
+        val client = client(
+            transport = transport,
+            flushIntervalMilliseconds = 0,
+            coroutineScope = this,
+        )
+        client.track("backgrounded")
+
+        client.requestFlush()
+        client.requestFlush()
+        assertTrue(transport.bodies.isEmpty())
+        advanceUntilIdle()
+
+        assertEquals(listOf("backgrounded"), transport.bodies.map(::eventName))
+        assertEquals(0, client.pendingEventCount())
+        client.shutdown()
+        client.requestFlush()
+        advanceUntilIdle()
+        assertEquals(1, transport.bodies.size)
+    }
+
+    @Test
+    fun lifecycleFlushRequestRetriesAnExplicitlyDeferredQueue() = runTest {
+        val transport = FakeTransport(
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Response(202),
+        )
+        val client = client(
+            transport = transport,
+            flushIntervalMilliseconds = 0,
+            coroutineScope = this,
+        )
+        client.track("deferred")
+        client.flush()
+        assertEquals(1, client.pendingEventCount())
+
+        client.requestFlush()
+        advanceUntilIdle()
+
+        assertEquals(0, client.pendingEventCount())
+        assertEquals(7, transport.bodies.size)
+        client.shutdown()
+    }
+
+    @Test
     fun boundedQueueFailsClosedAndEmitsOnlyRedactedDiagnostics() = runTest {
         val transport = FakeTransport(FakeOutcome.Response(202))
         val diagnostics = mutableListOf<PulsepondDiagnostic>()

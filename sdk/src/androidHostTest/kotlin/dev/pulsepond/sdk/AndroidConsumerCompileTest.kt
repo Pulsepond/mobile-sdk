@@ -22,3 +22,9 @@ private suspend fun createAndroidConsumer(context: Context): Pulsepond {
         )
     }
 }
+
+/** Mirrors an Android application/process ON_STOP callback without taking a lifecycle dependency. */
+@Suppress("unused")
+private fun onAndroidApplicationBackgrounded(client: Pulsepond) {
+    client.requestFlush()
+}

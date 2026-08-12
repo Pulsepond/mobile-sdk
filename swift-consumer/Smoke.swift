@@ -37,3 +37,8 @@ func flushAndShutdown(_ client: Pulsepond) async throws {
     try await client.flush()
     try await client.shutdown()
 }
+
+// Called from an application or scene background callback; intentionally non-blocking.
+func onApplicationBackgrounded(_ client: Pulsepond) {
+    client.requestFlush()
+}

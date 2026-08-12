@@ -334,6 +334,32 @@ public class Pulsepond internal constructor(
         }
     }
 
+    /**
+     * Requests a coalesced flush without blocking the caller.
+     *
+     * Use this from application or scene lifecycle callbacks that cannot suspend. Delivery is
+     * best effort because mobile operating systems may stop the process after the callback
+     * returns; pending events remain in durable storage for the next launch.
+     */
+    public fun requestFlush() {
+        val shouldSchedule = synchronized(stateLock) {
+            if (
+                queue.isEmpty() ||
+                immediateFlushScheduled ||
+                resetting ||
+                closing ||
+                closed
+            ) {
+                false
+            } else {
+                deliveryDeferred = false
+                immediateFlushScheduled = true
+                true
+            }
+        }
+        if (shouldSchedule) scheduleImmediateFlush()
+    }
+
     /** Discards unsent events and atomically rotates the installation and session identifiers. */
     @Throws(
         CancellationException::class,
