@@ -11,18 +11,22 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ShutdownDurabilityRaceTest {
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
-    fun earlierSnapshotSuccessSupersedesCancelledShutdownsFailedDuplicate() = runBlocking {
+    fun earlierSnapshotSuccessSupersedesCancelledShutdownsFailedDuplicate() = runTest {
         val persistence = BlockingFirstReplacePersistence()
         val diagnostics = mutableListOf<PulsepondDiagnostic>()
         val clientScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val shutdownDispatcher = StandardTestDispatcher(testScheduler)
         val client = Pulsepond(
             configuration = PulsepondConfiguration(
                 endpoint = "https://events.example.com/v1/batch",
@@ -43,7 +47,7 @@ class ShutdownDurabilityRaceTest {
         )
         client.track("pending")
         val initiatorFailure = CompletableDeferred<Throwable?>()
-        val initiator = launch(Dispatchers.Unconfined) {
+        val initiator = launch(shutdownDispatcher) {
             try {
                 client.shutdown()
                 initiatorFailure.complete(null)
@@ -51,10 +55,13 @@ class ShutdownDurabilityRaceTest {
                 initiatorFailure.complete(error)
             }
         }
+        runCurrent()
         assertTrue(persistence.firstReplaceStarted.await(5, TimeUnit.SECONDS))
-        val waiter = async(Dispatchers.Unconfined) { runCatching { client.shutdown() } }
+        val waiter = async(shutdownDispatcher) { runCatching { client.shutdown() } }
+        runCurrent()
 
         initiator.cancel()
+        runCurrent()
         persistence.releaseFirstReplace.countDown()
 
         initiator.join()
