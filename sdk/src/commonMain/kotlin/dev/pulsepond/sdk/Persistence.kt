@@ -18,6 +18,7 @@ import okio.use
 
 private const val persistenceFormat: Int = 1
 internal const val maximumJournalBytes: Long = 1_100_000
+private const val maximumPersistedLineBytes: Long = 64_000
 
 internal data class PersistedState(
     val installationId: String,
@@ -34,8 +35,10 @@ internal interface EventPersistence {
 
     fun replace(events: List<EventRecord>)
 
-    fun reset(newInstallationId: String)
+    fun reset(newInstallationId: String): PersistenceResetResult
 }
+
+internal data class PersistenceResetResult(val completed: Boolean)
 
 private sealed interface PersistenceCommand {
     data class Append(val event: EventRecord) : PersistenceCommand
@@ -47,7 +50,7 @@ private sealed interface PersistenceCommand {
 
     data class Reset(
         val installationId: String,
-        val completion: CompletableDeferred<Throwable?>,
+        val completion: CompletableDeferred<Result<PersistenceResetResult>>,
     ) : PersistenceCommand
 
     data class Barrier(val completion: CompletableDeferred<Unit>) : PersistenceCommand
@@ -88,14 +91,14 @@ internal class PersistenceWriter(
                     )
                 }
                 is PersistenceCommand.Reset -> {
-                    val error = try {
-                        persistence.reset(command.installationId)
+                    val result = try {
+                        val reset = persistence.reset(command.installationId)
                         currentEvents.clear()
-                        null
+                        Result.success(reset)
                     } catch (failure: PulsepondStorageException) {
-                        failure
+                        Result.failure(failure)
                     }
-                    command.completion.complete(error)
+                    command.completion.complete(result)
                 }
                 is PersistenceCommand.Barrier -> command.completion.complete(Unit)
                 is PersistenceCommand.Close -> {
@@ -131,8 +134,8 @@ internal class PersistenceWriter(
         }
     }
 
-    suspend fun reset(installationId: String) {
-        val completion = CompletableDeferred<Throwable?>()
+    suspend fun reset(installationId: String): PersistenceResetResult {
+        val completion = CompletableDeferred<Result<PersistenceResetResult>>()
         try {
             commands.send(PersistenceCommand.Reset(installationId, completion))
         } catch (error: CancellationException) {
@@ -140,7 +143,7 @@ internal class PersistenceWriter(
         } catch (_: Throwable) {
             throw PulsepondStorageException("Pulsepond could not queue durable reset")
         }
-        completion.await()?.let { throw it }
+        return completion.await().getOrThrow()
     }
 
     suspend fun drain() {
@@ -180,7 +183,8 @@ internal object VolatileEventPersistence : EventPersistence {
 
     override fun replace(events: List<EventRecord>) = Unit
 
-    override fun reset(newInstallationId: String) = Unit
+    override fun reset(newInstallationId: String): PersistenceResetResult =
+        PersistenceResetResult(completed = true)
 }
 
 internal class FileEventPersistence(
@@ -196,34 +200,50 @@ internal class FileEventPersistence(
         fileSystem.createDirectories(directory)
         var recovered = 0
         val activeId = when (val stored = readManifest()) {
-            is ManifestState.Valid -> stored.installationId
-            ManifestState.Missing -> newInstallationId().also(::writeManifest)
+            is ManifestState.Active -> stored.installationId
+            is ManifestState.Resetting -> {
+                installationId = stored.installationId
+                deleteInactiveEventFiles(stored.installationId)
+                writeManifest(stored.installationId, resetting = false)
+                recovered += 1
+                stored.installationId
+            }
+            ManifestState.Missing -> newInstallationId().also {
+                writeManifest(it, resetting = false)
+            }
             ManifestState.Invalid -> {
                 recovered += 1
-                newInstallationId().also(::writeManifest)
+                newInstallationId().also { writeManifest(it, resetting = false) }
             }
         }
         installationId = activeId
-        deleteOrphanedJournals(activeId)
+        deleteInactiveEventFiles(activeId)
         val journal = journal(activeId)
         if (!fileSystem.exists(journal)) return@storageOperation PersistedState(activeId, emptyList(), recovered)
-        val journalExceededLimit = (fileSystem.metadata(journal).size ?: 0) > maximumJournalBytes
+        if ((fileSystem.metadata(journal).size ?: 0) > maximumJournalBytes) {
+            atomicWrite(journal, "")
+            return@storageOperation PersistedState(activeId, emptyList(), recovered + 1)
+        }
         val events = mutableListOf<EventRecord>()
         var eventBytes = 0
         fileSystem.source(journal).buffer().use { source ->
             while (!source.exhausted()) {
-                val line = source.readUtf8Line() ?: break
+                val line = source.readBoundedUtf8Line()
+                if (line == null) {
+                    recovered += 1
+                    continue
+                }
                 if (line.isBlank()) continue
                 val event = parsePersistedEvent(line)
                 if (event == null || event.anonymousInstallationId != activeId) {
                     recovered += 1
                 } else {
                     val encodedBytes = persistedLine(event).encodeToByteArray().size
-                    while (events.isNotEmpty() && eventBytes + encodedBytes > maxQueueBytes) {
-                        eventBytes -= persistedLine(events.removeAt(0)).encodeToByteArray().size
-                        recovered += 1
-                    }
                     if (encodedBytes > maxQueueBytes) {
+                        recovered += 1
+                        continue
+                    }
+                    if (eventBytes + encodedBytes > maxQueueBytes) {
                         recovered += 1
                         continue
                     }
@@ -232,7 +252,7 @@ internal class FileEventPersistence(
                 }
             }
         }
-        if (recovered > 0 || journalExceededLimit) replace(events)
+        if (recovered > 0) replace(events)
         PersistedState(activeId, events, recovered)
     }
 
@@ -260,16 +280,21 @@ internal class FileEventPersistence(
         atomicWrite(journal(requireInstallationId()), body)
     }
 
-    override fun reset(newInstallationId: String): Unit = storageOperation("reset") {
+    override fun reset(
+        newInstallationId: String,
+    ): PersistenceResetResult = storageOperation("reset") {
         requireInstallationId()
         atomicWrite(journal(newInstallationId), "")
+        writeManifest(newInstallationId, resetting = true)
+        installationId = newInstallationId
         try {
-            deleteOrphanedJournals(newInstallationId)
-            writeManifest(newInstallationId)
-            installationId = newInstallationId
-        } catch (error: Throwable) {
-            runCatching { fileSystem.delete(journal(newInstallationId), mustExist = false) }
-            throw error
+            storageOperation("complete reset") {
+                deleteInactiveEventFiles(newInstallationId)
+                writeManifest(newInstallationId, resetting = false)
+            }
+            PersistenceResetResult(completed = true)
+        } catch (_: PulsepondStorageException) {
+            PersistenceResetResult(completed = false)
         }
     }
 
@@ -286,16 +311,21 @@ internal class FileEventPersistence(
                 installationId != null &&
                 isUuidV7(installationId)
             ) {
-                ManifestState.Valid(installationId)
+                when (json["state"]?.jsonPrimitive?.content) {
+                    "active" -> ManifestState.Active(installationId)
+                    "resetting" -> ManifestState.Resetting(installationId)
+                    else -> ManifestState.Invalid
+                }
             } else {
                 ManifestState.Invalid
             }
         }.getOrElse { ManifestState.Invalid }
     }
 
-    private fun writeManifest(value: String) {
+    private fun writeManifest(value: String, resetting: Boolean) {
         val body = buildJsonObject {
             put("format", persistenceFormat)
+            put("state", if (resetting) "resetting" else "active")
             put("installation_id", value)
         }.toString()
         atomicWrite(manifest, body)
@@ -304,20 +334,28 @@ internal class FileEventPersistence(
     private fun atomicWrite(target: Path, value: String) {
         val temporary = directory / ".${target.name}.tmp"
         fileSystem.delete(temporary, mustExist = false)
+        var moved = false
         try {
             fileSystem.write(temporary) { writeUtf8(value) }
             fileSystem.atomicMove(temporary, target)
+            moved = true
         } finally {
-            fileSystem.delete(temporary, mustExist = false)
+            if (moved) {
+                runCatching { fileSystem.delete(temporary, mustExist = false) }
+            } else {
+                fileSystem.delete(temporary, mustExist = false)
+            }
         }
     }
 
     private fun journal(value: String): Path = directory / "$value.events"
 
-    private fun deleteOrphanedJournals(activeInstallationId: String) {
+    private fun deleteInactiveEventFiles(activeInstallationId: String) {
         val activeJournal = journal(activeInstallationId)
         fileSystem.list(directory)
-            .filter { path -> path.name.endsWith(".events") && path != activeJournal }
+            .filter { path ->
+                (isOwnedJournal(path) && path != activeJournal) || isOwnedJournalTemporary(path)
+            }
             .forEach { path -> fileSystem.delete(path, mustExist = false) }
     }
 
@@ -330,10 +368,43 @@ private sealed interface ManifestState {
 
     data object Invalid : ManifestState
 
-    data class Valid(val installationId: String) : ManifestState
+    data class Active(val installationId: String) : ManifestState
+
+    data class Resetting(val installationId: String) : ManifestState
 }
 
 private fun persistedLine(event: EventRecord): String = "${event.json()}\n"
+
+private fun isOwnedJournal(path: Path): Boolean =
+    path.name.endsWith(".events") && isUuidV7(path.name.removeSuffix(".events"))
+
+private fun isOwnedJournalTemporary(path: Path): Boolean =
+    path.name.startsWith('.') &&
+        path.name.endsWith(".events.tmp") &&
+        isUuidV7(path.name.removePrefix(".").removeSuffix(".events.tmp"))
+
+private fun okio.BufferedSource.readBoundedUtf8Line(): String? {
+    if (!request(maximumPersistedLineBytes + 1)) return readUtf8Line()
+    val newline = indexOf('\n'.code.toByte(), 0, maximumPersistedLineBytes + 1)
+    if (newline >= 0) {
+        val line = readUtf8(newline)
+        skip(1)
+        return line
+    }
+    skip(maximumPersistedLineBytes + 1)
+    while (true) {
+        val nextNewline = indexOf('\n'.code.toByte(), 0, maximumPersistedLineBytes + 1)
+        if (nextNewline >= 0) {
+            skip(nextNewline + 1)
+            return null
+        }
+        if (!request(maximumPersistedLineBytes + 1)) {
+            skip(buffer.size)
+            return null
+        }
+        skip(maximumPersistedLineBytes + 1)
+    }
+}
 
 private inline fun <T> storageOperation(action: String, block: () -> T): T = try {
     block()

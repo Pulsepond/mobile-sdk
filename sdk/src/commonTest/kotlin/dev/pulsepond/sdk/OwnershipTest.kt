@@ -1,5 +1,6 @@
 package dev.pulsepond.sdk
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
@@ -7,7 +8,7 @@ import kotlin.test.assertFailsWith
 class OwnershipTest {
     @Test
     fun oneNamespaceHasOnlyOneLiveProcessOwner() {
-        val namespace = "${testSourceId}/ownership-test"
+        val namespace = "$testDeploymentId/$testProjectId/$testSourceId/ownership-test"
         val first = ClientOwnershipRegistry.acquire(namespace)
         try {
             assertFailsWith<PulsepondStorageException> {
@@ -23,12 +24,14 @@ class OwnershipTest {
     @Test
     fun clientShutdownReleasesItsNamespaceLease() = runTest {
         val environment = "shutdown-ownership-test"
-        val namespace = "$testSourceId/$environment"
+        val namespace = "$testDeploymentId/$testProjectId/$testSourceId/$environment"
         val lease = ClientOwnershipRegistry.acquire(namespace)
         val client = Pulsepond(
             configuration = PulsepondConfiguration(
                 endpoint = "https://events.example.com/v1/batch",
                 writeKey = testWriteKey,
+                deploymentId = testDeploymentId,
+                projectId = testProjectId,
                 sourceId = testSourceId,
                 environment = environment,
                 flushIntervalMilliseconds = 0,
@@ -48,5 +51,33 @@ class OwnershipTest {
         client.shutdown()
 
         ClientOwnershipRegistry.acquire(namespace).release()
+    }
+
+    @Test
+    fun cancelledFactoryCreationReleasesItsNamespaceLease() = runTest {
+        val configuration = PulsepondConfiguration(
+            endpoint = "https://events.example.com/v1/batch",
+            writeKey = testWriteKey,
+            deploymentId = testDeploymentId,
+            projectId = testProjectId,
+            sourceId = testSourceId,
+            environment = "cancelled-factory-test",
+            flushIntervalMilliseconds = 0,
+        )
+
+        assertFailsWith<CancellationException> {
+            createPulsepondInBackground(
+                create = {
+                    createOwnedPersistentPulsepond(
+                        configuration,
+                        VolatileEventPersistence,
+                        startAutomaticDelivery = false,
+                    )
+                },
+                afterCreate = { throw CancellationException("test cancellation") },
+            )
+        }
+
+        ClientOwnershipRegistry.acquire(configuration.storageNamespace).release()
     }
 }

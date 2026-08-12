@@ -71,17 +71,21 @@ class ProtocolTest {
         val valid = PulsepondConfiguration(
             endpoint = "https://events.example.com/v1/batch",
             writeKey = testWriteKey,
+            deploymentId = testDeploymentId,
+            projectId = testProjectId,
             sourceId = testSourceId,
             environment = "production",
         )
         assertEquals("events.example.com", valid.parsedEndpoint.host)
         assertEquals(
-            "$testSourceId/production",
+            "$testDeploymentId/$testProjectId/$testSourceId/production",
             valid.storageNamespace,
         )
         val rotatedCredential = PulsepondConfiguration(
             endpoint = "https://events.example.com/v1/batch",
             writeKey = replacementWriteKey,
+            deploymentId = testDeploymentId,
+            projectId = testProjectId,
             sourceId = testSourceId,
             environment = "production",
         )
@@ -90,7 +94,29 @@ class ProtocolTest {
             PulsepondConfiguration(
                 "https://events.example.com/v1/batch",
                 testWriteKey,
-                "not-a-source-id",
+                "not-a-deployment-id",
+                testProjectId,
+                testSourceId,
+                "production",
+            )
+        }
+        assertFailsWith<PulsepondConfigurationException> {
+            PulsepondConfiguration(
+                "https://events.example.com/v1/batch",
+                testWriteKey,
+                testDeploymentId,
+                "bad/project",
+                testSourceId,
+                "production",
+            )
+        }
+        assertFailsWith<PulsepondConfigurationException> {
+            PulsepondConfiguration(
+                "https://events.example.com/v1/batch",
+                testWriteKey,
+                testDeploymentId,
+                testProjectId,
+                "bad/source",
                 "production",
             )
         }
@@ -102,7 +128,14 @@ class ProtocolTest {
             "https://events.example.com/v2/batch",
         )) {
             assertFailsWith<PulsepondConfigurationException>(endpoint) {
-                PulsepondConfiguration(endpoint, testWriteKey, testSourceId, "production")
+                PulsepondConfiguration(
+                    endpoint,
+                    testWriteKey,
+                    testDeploymentId,
+                    testProjectId,
+                    testSourceId,
+                    "production",
+                )
             }
         }
         assertTrue(
@@ -110,6 +143,8 @@ class ProtocolTest {
                 PulsepondConfiguration(
                     "http://localhost:8787/v1/batch",
                     testWriteKey,
+                    testDeploymentId,
+                    testProjectId,
                     testSourceId,
                     "test",
                 )
@@ -122,7 +157,9 @@ internal const val testWriteKey: String =
     "ppw_v1_0123456789abcdef0123456789abcdef_" +
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-internal const val testSourceId: String = "fedcba9876543210fedcba9876543210"
+internal const val testDeploymentId: String = "01234567-89ab-4def-8abc-0123456789ab"
+internal const val testProjectId: String = "project_foundation"
+internal const val testSourceId: String = "source_mobile"
 
 internal const val replacementWriteKey: String =
     "ppw_v1_fedcba9876543210fedcba9876543210_" +

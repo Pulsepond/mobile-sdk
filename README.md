@@ -39,7 +39,9 @@ suspend fun createAnalytics(context: Context): Pulsepond {
         PulsepondConfiguration(
             endpoint = "https://pulsepond.example.com/v1/batch",
             writeKey = "ppw_v1_...",
-            sourceId = "0123456789abcdef0123456789abcdef",
+            deploymentId = "01234567-89ab-4def-8abc-0123456789ab",
+            projectId = "project_foundation",
+            sourceId = "source_android",
             environment = "production",
             appVersion = BuildConfig.VERSION_NAME,
             release = "android@${BuildConfig.VERSION_NAME}",
@@ -66,7 +68,9 @@ import Pulsepond
 let configuration = try PulsepondConfiguration(
     endpoint: "https://pulsepond.example.com/v1/batch",
     writeKey: "ppw_v1_...",
-    sourceId: "0123456789abcdef0123456789abcdef",
+    deploymentId: "01234567-89ab-4def-8abc-0123456789ab",
+    projectId: "project_foundation",
+    sourceId: "source_ios",
     environment: "production",
     appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
     release: "ios@1.0.0",
@@ -92,7 +96,7 @@ Validation failures cross the generated Objective-C boundary as Swift errors. Co
 - Every event receives a UUIDv7 `event_id`, UTC `occurred_at`, platform, environment, anonymous installation ID, and session ID.
 - Properties are flat and intentionally closed to strings, safe integers, booleans, and null. Names and values are bounded before enqueueing.
 - Queues, batches, retry counts, retry delays, event age, and on-disk journal size are bounded. A 413 response splits a batch without changing event IDs.
-- Android and Apple factories persist the installation identity and unsent queue in app-private storage, isolated by stable source ID and environment. `track` returns without filesystem I/O; one bounded serial writer preserves operation order in the background. Accepted event IDs may be replayed after a storage write failure, so the server remains responsible for idempotent ingestion.
+- Android and Apple factories persist the installation identity and unsent queue in app-private storage, isolated by deployment, project, source, and environment. `track` returns without filesystem I/O; one bounded serial writer preserves operation order in the background. Accepted event IDs may be replayed after a storage write failure, so the server remains responsible for idempotent ingestion.
 - A batch body is frozen before its first attempt and remains byte-identical across retries.
 - HTTP 202 is the only success response. Network errors, 408, 429, and 5xx responses retry with bounded jitter. Other 4xx responses are terminal.
 - Diagnostics never contain event payloads, property values, endpoint query data, or credentials.
@@ -103,7 +107,7 @@ See [Architecture](docs/ARCHITECTURE.md) for the design constraints and [Contrib
 
 ## Credentials and privacy
 
-A Pulsepond write key is a publishable, source-scoped ingestion credential. Mobile binaries cannot keep a bundled value secret. Never embed a control-plane token, Cloudflare token, or read credential. Rotate the write key if a source is abused. The non-secret `sourceId` identifies the durable storage namespace and must remain unchanged when its write key rotates.
+A Pulsepond write key is a publishable, source-scoped ingestion credential. Mobile binaries cannot keep a bundled value secret. Never embed a control-plane token, Cloudflare token, or read credential. Rotate the write key if a source is abused. The non-secret deployment, project, and source IDs identify the durable storage namespace and must remain unchanged when its write key rotates.
 
 Pulsepond cannot know whether a custom property is personal data. Do not send email addresses, authorization values, cookies, full URLs or query strings, search text, feedback bodies, request bodies, or other content that your disclosure and retention policy do not cover.
 

@@ -2,8 +2,6 @@ package dev.pulsepond.sdk
 
 import android.content.Context
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import okio.FileSystem
 import okio.Path.Companion.toOkioPath
 
@@ -17,13 +15,14 @@ public object PulsepondAndroid {
         PulsepondStorageException::class,
     )
     public suspend fun create(context: Context, configuration: PulsepondConfiguration): Pulsepond =
-        withContext(Dispatchers.Default) {
+        createPulsepondInBackground(create = {
             val directory = context.applicationContext.noBackupFilesDir.toOkioPath() /
                 "pulsepond" /
                 configuration.storageNamespace
             createOwnedPersistentPulsepond(
                 configuration,
                 FileEventPersistence(FileSystem.SYSTEM, directory),
+                startAutomaticDelivery = false,
             )
-        }
+        })
 }

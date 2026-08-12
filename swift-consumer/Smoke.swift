@@ -12,7 +12,9 @@ func makePulsepondClient() async throws -> Pulsepond {
     let configuration = try PulsepondConfiguration(
         endpoint: "https://events.example.com/v1/batch",
         writeKey: "ppw_v1_0123456789abcdef0123456789abcdef_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        sourceId: "fedcba9876543210fedcba9876543210",
+        deploymentId: "01234567-89ab-4def-8abc-0123456789ab",
+        projectId: "project_foundation",
+        sourceId: "source_ios",
         environment: "production",
         appVersion: "1.0.0",
         release: "ios@1.0.0",

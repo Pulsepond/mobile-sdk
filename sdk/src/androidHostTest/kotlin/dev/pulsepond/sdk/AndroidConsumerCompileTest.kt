@@ -8,6 +8,8 @@ private suspend fun createAndroidConsumer(context: Context): Pulsepond {
     val configuration = PulsepondConfiguration(
         endpoint = "https://events.example.com/v1/batch",
         writeKey = testWriteKey,
+        deploymentId = testDeploymentId,
+        projectId = testProjectId,
         sourceId = testSourceId,
         environment = "production",
         appVersion = "1.0.0",

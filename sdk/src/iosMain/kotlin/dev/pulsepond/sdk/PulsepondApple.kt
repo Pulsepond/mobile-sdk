@@ -3,8 +3,6 @@
 package dev.pulsepond.sdk
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import okio.FileSystem
 import okio.Path.Companion.toPath
 import platform.Foundation.NSBundle
@@ -22,7 +20,7 @@ public object PulsepondApple {
         PulsepondStorageException::class,
     )
     public suspend fun create(configuration: PulsepondConfiguration): Pulsepond =
-        withContext(Dispatchers.Default) {
+        createPulsepondInBackground(create = {
             val bundleId = NSBundle.mainBundle.bundleIdentifier ?: "unknown-application"
             val directory = "${NSHomeDirectory()}/Library/Application Support/$bundleId/Pulsepond"
                 .toPath() /
@@ -50,6 +48,7 @@ public object PulsepondApple {
             createOwnedPersistentPulsepond(
                 configuration,
                 FileEventPersistence(FileSystem.SYSTEM, directory),
+                startAutomaticDelivery = false,
             )
-        }
+        })
 }

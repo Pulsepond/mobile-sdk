@@ -1,6 +1,7 @@
 package dev.pulsepond.sdk
 
 import io.ktor.http.fromHttpToGmtDate
+import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
@@ -78,6 +79,7 @@ public class Pulsepond internal constructor(
     private val randomBytes: (ByteArray) -> Unit,
     private val persistence: EventPersistence = VolatileEventPersistence,
     private val ownershipLease: ClientOwnershipLease? = null,
+    private val automaticallyStart: Boolean = true,
     coroutineScope: CoroutineScope? = null,
 ) {
     private val stateLock: SynchronizedObject = SynchronizedObject()
@@ -120,6 +122,7 @@ public class Pulsepond internal constructor(
     private var closing: Boolean = false
     private var closed: Boolean = false
     private var shutdownCompletion: CompletableDeferred<Unit>? = null
+    private var automaticDeliveryStarted: Boolean = false
     private val persistenceWriter: PersistenceWriter = PersistenceWriter(
         persistence = persistence,
         initialEvents = queue.map(QueuedEvent::event),
@@ -147,13 +150,7 @@ public class Pulsepond internal constructor(
                 ),
             )
         }
-        if (queue.size >= effectiveBatchSize) {
-            immediateFlushScheduled = true
-            scheduleImmediateFlush()
-        } else if (queue.isNotEmpty() && configuration.flushIntervalMilliseconds > 0) {
-            automaticFlushScheduled = true
-            scheduleTimedFlush()
-        }
+        if (automaticallyStart) startAutomaticDelivery()
     }
 
     /** Enqueues an event and returns its UUIDv7, or null when the bounded queue is full. */
@@ -254,6 +251,11 @@ public class Pulsepond internal constructor(
         }
         repeat(maxBatchesPerFlush) {
             val batch = nextBatch() ?: return@withLock
+            if (!persistCurrentQueue()) {
+                synchronized(stateLock) { deliveryDeferred = true }
+                notifyStorageFailure()
+                return@withLock
+            }
             when (val result = deliver(batch)) {
                 DeliveryResult.Accepted -> {
                     if (removeBatch(batch)) notifyStorageFailure()
@@ -325,10 +327,11 @@ public class Pulsepond internal constructor(
             generationInvalidation.complete(Unit)
             installationId
         }
+        var resetCompleted = true
         try {
             withContext(NonCancellable) {
                 flushLock.withLock {
-                    persistenceWriter.reset(newInstallationId)
+                    resetCompleted = persistenceWriter.reset(newInstallationId).completed
                     synchronized(stateLock) {
                         generation += 1
                         generationInvalidation = CompletableDeferred()
@@ -347,6 +350,12 @@ public class Pulsepond internal constructor(
                 resetting = false
             }
             throw error
+        }
+        if (!resetCompleted) {
+            notifyStorageFailure()
+            throw PulsepondStorageException(
+                "Pulsepond committed identity reset but could not finish durable cleanup",
+            )
         }
     }
 
@@ -419,6 +428,49 @@ public class Pulsepond internal constructor(
 
     internal suspend fun awaitPersistence() {
         persistenceWriter.drain()
+    }
+
+    internal fun startAutomaticDelivery() {
+        val action = synchronized(stateLock) {
+            if (automaticDeliveryStarted || closing || closed) return
+            automaticDeliveryStarted = true
+            when {
+                queue.size >= effectiveBatchSize -> {
+                    immediateFlushScheduled = true
+                    1
+                }
+                queue.isNotEmpty() && configuration.flushIntervalMilliseconds > 0 -> {
+                    automaticFlushScheduled = true
+                    2
+                }
+                else -> 0
+            }
+        }
+        if (action == 1) scheduleImmediateFlush()
+        if (action == 2) scheduleTimedFlush()
+    }
+
+    internal suspend fun disposeAfterCancelledCreation() {
+        withContext(NonCancellable) {
+            synchronized(stateLock) {
+                closing = true
+                closed = true
+                generationInvalidation.complete(Unit)
+            }
+            try {
+                persistenceWriter.close()
+            } catch (_: Throwable) {
+                // The caller cannot recover an instance that was cancelled before publication.
+            }
+            try {
+                transport.close()
+            } catch (_: Throwable) {
+                // The namespace lease and owned scope must still be released.
+            } finally {
+                if (ownsScope) scope.cancel()
+                ownershipLease?.release()
+            }
+        }
     }
 
     private fun scheduleImmediateFlush() {
@@ -620,6 +672,13 @@ public class Pulsepond internal constructor(
         return replacement == null || !persistenceWriter.awaitReplace(replacement)
     }
 
+    private suspend fun persistCurrentQueue(): Boolean {
+        val replacement = synchronized(stateLock) {
+            persistenceWriter.tryReplace(queue.map(QueuedEvent::event))
+        }
+        return replacement != null && persistenceWriter.awaitReplace(replacement)
+    }
+
     private fun notify(diagnostic: PulsepondDiagnostic) {
         try {
             configuration.diagnosticListener?.onDiagnostic(diagnostic)
@@ -643,6 +702,7 @@ internal fun createPersistentPulsepond(
     configuration: PulsepondConfiguration,
     persistence: EventPersistence,
     ownershipLease: ClientOwnershipLease? = null,
+    startAutomaticDelivery: Boolean = true,
 ): Pulsepond = Pulsepond(
     configuration = configuration,
     transport = KtorEventTransport(configuration),
@@ -650,18 +710,38 @@ internal fun createPersistentPulsepond(
     randomBytes = ::fillSecureRandom,
     persistence = persistence,
     ownershipLease = ownershipLease,
+    automaticallyStart = startAutomaticDelivery,
     coroutineScope = null,
 )
 
 internal fun createOwnedPersistentPulsepond(
     configuration: PulsepondConfiguration,
     persistence: EventPersistence,
+    startAutomaticDelivery: Boolean = true,
 ): Pulsepond {
     val lease = ClientOwnershipRegistry.acquire(configuration.storageNamespace)
     return try {
-        createPersistentPulsepond(configuration, persistence, lease)
+        createPersistentPulsepond(configuration, persistence, lease, startAutomaticDelivery)
     } catch (error: Throwable) {
         lease.release()
+        throw error
+    }
+}
+
+internal suspend fun createPulsepondInBackground(
+    create: () -> Pulsepond,
+    afterCreate: () -> Unit = {},
+): Pulsepond {
+    val createdClient = atomic<Pulsepond?>(null)
+    return try {
+        withContext(Dispatchers.Default) {
+            create().also { client ->
+                createdClient.value = client
+                afterCreate()
+            }
+        }.also(Pulsepond::startAutomaticDelivery)
+    } catch (error: CancellationException) {
+        createdClient.value?.disposeAfterCancelledCreation()
         throw error
     }
 }

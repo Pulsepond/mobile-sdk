@@ -20,12 +20,16 @@ class PersistenceTest {
         val initial = PulsepondConfiguration(
             "https://events.example.com/v1/batch",
             testWriteKey,
+            testDeploymentId,
+            testProjectId,
             testSourceId,
             "production",
         )
         val rotated = PulsepondConfiguration(
             "https://events.example.com/v1/batch",
             replacementWriteKey,
+            testDeploymentId,
+            testProjectId,
             testSourceId,
             "production",
         )
@@ -137,7 +141,7 @@ class PersistenceTest {
     }
 
     @Test
-    fun resetFailsUnlessThePreviousJournalIsDeleted() {
+    fun interruptedResetNeverReplaysThePreviousGeneration() {
         val delegate = FakeFileSystem()
         val directory = "/pulsepond/source/production".toPath()
         val oldJournal = directory / "$installationIdOne.events"
@@ -148,14 +152,14 @@ class PersistenceTest {
         persistence.load { installationIdOne }
         persistence.append(event(installationIdOne), listOf(event(installationIdOne)))
 
-        assertFailsWith<PulsepondStorageException> {
-            persistence.reset(installationIdTwo)
-        }
+        val result = persistence.reset(installationIdTwo)
 
+        assertFalse(result.completed)
         fileSystem.failDelete = null
         val restored = FileEventPersistence(fileSystem, directory).load { installationIdTwo }
-        assertEquals(installationIdOne, restored.installationId)
-        assertEquals(1, restored.events.size)
+        assertEquals(installationIdTwo, restored.installationId)
+        assertTrue(restored.events.isEmpty())
+        assertFalse(delegate.exists(oldJournal))
         delegate.checkNoOpenFiles()
     }
 
@@ -169,15 +173,53 @@ class PersistenceTest {
         persistence.append(event(installationIdOne), listOf(event(installationIdOne)))
         fileSystem.failList = { path -> path == directory }
 
-        assertFailsWith<PulsepondStorageException> {
-            persistence.reset(installationIdTwo)
-        }
+        val result = persistence.reset(installationIdTwo)
 
+        assertFalse(result.completed)
         fileSystem.failList = null
         val restored = FileEventPersistence(fileSystem, directory).load { installationIdTwo }
-        assertEquals(installationIdOne, restored.installationId)
-        assertEquals(1, restored.events.size)
+        assertEquals(installationIdTwo, restored.installationId)
+        assertTrue(restored.events.isEmpty())
         delegate.checkNoOpenFiles()
+    }
+
+    @Test
+    fun recoveryCompletesResetWhenFinalManifestWriteFailed() {
+        val delegate = FakeFileSystem()
+        val directory = "/pulsepond/source/production".toPath()
+        val manifest = directory / "active.json"
+        val fileSystem = FaultingFileSystem(delegate)
+        val persistence = FileEventPersistence(fileSystem, directory)
+        persistence.load { installationIdOne }
+        persistence.append(event(installationIdOne), listOf(event(installationIdOne)))
+        fileSystem.failAtomicMoveTarget = manifest
+        fileSystem.successfulTargetMovesBeforeFailure = 1
+
+        val result = persistence.reset(installationIdTwo)
+
+        assertFalse(result.completed)
+        fileSystem.failAtomicMoveTarget = null
+        val restored = FileEventPersistence(fileSystem, directory).load { installationIdOne }
+        assertEquals(installationIdTwo, restored.installationId)
+        assertTrue(restored.events.isEmpty())
+        assertFalse(delegate.exists(directory / "$installationIdOne.events"))
+        delegate.checkNoOpenFiles()
+    }
+
+    @Test
+    fun resetDeletesCrashLeftJournalTemporaryFiles() {
+        val fileSystem = FakeFileSystem()
+        val directory = "/pulsepond/source/production".toPath()
+        val persistence = FileEventPersistence(fileSystem, directory)
+        persistence.load { installationIdOne }
+        val oldTemporary = directory / ".$installationIdOne.events.tmp"
+        fileSystem.write(oldTemporary) { writeUtf8("${event(installationIdOne).json()}\n") }
+
+        val result = persistence.reset(installationIdTwo)
+
+        assertTrue(result.completed)
+        assertFalse(fileSystem.exists(oldTemporary))
+        fileSystem.checkNoOpenFiles()
     }
 
     @Test
@@ -208,24 +250,27 @@ class PersistenceTest {
     }
 
     @Test
-    fun oversizedLegacyJournalKeepsABoundedValidTailInsteadOfDroppingEverything() {
-        val fileSystem = FakeFileSystem()
+    fun oversizedLegacyJournalIsDiscardedWithoutReadingItsContents() {
+        val delegate = FakeFileSystem()
         val directory = "/pulsepond/source/production".toPath()
-        val persistence = FileEventPersistence(fileSystem, directory)
+        val persistence = FileEventPersistence(delegate, directory)
         persistence.load { installationIdOne }
         val line = "${event(installationIdOne).json()}\n"
-        val copies = (maximumJournalBytes / line.encodeToByteArray().size + 2).toInt()
+        val copies = (maximumJournalBytes * 3 / line.encodeToByteArray().size + 2).toInt()
         val journal = directory / "$installationIdOne.events"
-        fileSystem.write(journal) {
+        delegate.write(journal) {
             repeat(copies) { writeUtf8(line) }
+        }
+        val fileSystem = FaultingFileSystem(delegate).apply {
+            failSource = { path -> path == journal }
         }
 
         val restored = FileEventPersistence(fileSystem, directory).load { installationIdTwo }
 
-        assertTrue(restored.events.isNotEmpty())
-        assertTrue(restored.recoveredRecords > 0)
-        assertTrue(fileSystem.metadata(journal).size!! <= maximumJournalBytes)
-        fileSystem.checkNoOpenFiles()
+        assertTrue(restored.events.isEmpty())
+        assertEquals(1, restored.recoveredRecords)
+        assertEquals(0, delegate.metadata(journal).size)
+        delegate.checkNoOpenFiles()
     }
 
     @Test
@@ -258,6 +303,8 @@ private class FaultingFileSystem(
     var failList: ((Path) -> Boolean)? = null
     var failSource: ((Path) -> Boolean)? = null
     var failedAtomicMoves: Int = 0
+    var failAtomicMoveTarget: Path? = null
+    var successfulTargetMovesBeforeFailure: Int = 0
 
     override fun delete(path: Path, mustExist: Boolean) {
         if (failDelete?.invoke(path) == true) error("test delete failure")
@@ -275,6 +322,10 @@ private class FaultingFileSystem(
     }
 
     override fun atomicMove(source: Path, target: Path) {
+        if (target == failAtomicMoveTarget) {
+            if (successfulTargetMovesBeforeFailure == 0) error("test target move failure")
+            successfulTargetMovesBeforeFailure -= 1
+        }
         if (failedAtomicMoves > 0) {
             failedAtomicMoves -= 1
             error("test atomic move failure")

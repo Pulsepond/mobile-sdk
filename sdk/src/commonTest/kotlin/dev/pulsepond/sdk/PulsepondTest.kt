@@ -254,6 +254,27 @@ class PulsepondTest {
     }
 
     @Test
+    fun committedResetRotatesIdentityEvenWhenCleanupMustResumeLater() = runTest {
+        val transport = FakeTransport(
+            FakeOutcome.Response(202),
+            FakeOutcome.Response(202),
+        )
+        val client = client(
+            transport = transport,
+            persistence = FailingPersistence(incompleteReset = true),
+        )
+        client.track("before_reset")
+        client.flush()
+
+        assertFailsWith<PulsepondStorageException> { client.reset() }
+        client.track("after_reset")
+        client.flush()
+
+        assertNotEquals(anonymousId(transport.bodies.first()), anonymousId(transport.bodies.last()))
+        client.shutdown()
+    }
+
+    @Test
     fun retryExhaustionDefersRatherThanDropsTheDurableQueue() = runTest {
         val fileSystem = okio.fakefilesystem.FakeFileSystem()
         val directory = "/pulsepond/retry".toPath()
@@ -276,7 +297,6 @@ class PulsepondTest {
         client.flush()
 
         assertEquals(1, client.pendingEventCount())
-        client.awaitPersistence()
         val exhausted = diagnostics.last()
         assertEquals(PulsepondDiagnosticCode.RetryExhausted, exhausted.code)
         assertEquals(0, exhausted.droppedEvents)
@@ -396,6 +416,7 @@ private class BlockingTransport : RecordingTransport() {
 private class FailingPersistence(
     private val failAppend: Boolean = false,
     private val failReset: Boolean = false,
+    private val incompleteReset: Boolean = false,
 ) : EventPersistence {
     override val isDurable: Boolean = true
 
@@ -420,10 +441,11 @@ private class FailingPersistence(
         this.events += events
     }
 
-    override fun reset(newInstallationId: String) {
+    override fun reset(newInstallationId: String): PersistenceResetResult {
         if (failReset) throw PulsepondStorageException("test reset failure")
         installationId = newInstallationId
         events.clear()
+        return PersistenceResetResult(completed = !incompleteReset)
     }
 }
 
@@ -442,6 +464,8 @@ private fun client(
         configuration = PulsepondConfiguration(
             endpoint = "https://events.example.com/v1/batch",
             writeKey = testWriteKey,
+            deploymentId = testDeploymentId,
+            projectId = testProjectId,
             sourceId = testSourceId,
             environment = "production",
             batchSize = batchSize,
