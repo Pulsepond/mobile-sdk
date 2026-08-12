@@ -15,7 +15,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: refs/tags/${{ github.event.release.tag_name }}
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v6
       - name: Set up JDK 21
