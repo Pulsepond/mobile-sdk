@@ -141,6 +141,7 @@ public class Pulsepond internal constructor(
     private var effectiveBatchSize: Int = configuration.batchSize
     private var automaticFlushScheduled: Boolean = false
     private var immediateFlushScheduled: Boolean = false
+    private var explicitFlushPending: Boolean = false
     private var deliveryDeferred: Boolean = false
     private var resetting: Boolean = false
     private var closing: Boolean = false
@@ -345,11 +346,13 @@ public class Pulsepond internal constructor(
         val shouldSchedule = synchronized(stateLock) {
             if (
                 queue.isEmpty() ||
-                immediateFlushScheduled ||
                 resetting ||
                 closing ||
                 closed
             ) {
+                false
+            } else if (immediateFlushScheduled) {
+                explicitFlushPending = true
                 false
             } else {
                 deliveryDeferred = false
@@ -399,6 +402,7 @@ public class Pulsepond internal constructor(
                         durableEventIds.clear()
                         effectiveBatchSize = configuration.batchSize
                         deliveryDeferred = false
+                        explicitFlushPending = false
                         identity.reset(now, newInstallationId)
                         resetting = false
                     }
@@ -598,12 +602,22 @@ public class Pulsepond internal constructor(
             } finally {
                 val flushAgain = synchronized(stateLock) {
                     immediateFlushScheduled = false
+                    val explicitRequest = explicitFlushPending
+                    explicitFlushPending = false
                     if (
-                        queue.size >= effectiveBatchSize &&
-                        !deliveryDeferred &&
+                        queue.isNotEmpty() &&
+                        !resetting &&
                         !closing &&
-                        !closed
+                        !closed &&
+                        (
+                            explicitRequest ||
+                                (
+                                    queue.size >= effectiveBatchSize &&
+                                        !deliveryDeferred
+                                )
+                        )
                     ) {
+                        if (explicitRequest) deliveryDeferred = false
                         immediateFlushScheduled = true
                         true
                     } else {

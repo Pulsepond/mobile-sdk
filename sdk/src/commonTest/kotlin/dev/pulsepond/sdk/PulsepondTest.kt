@@ -177,6 +177,38 @@ class PulsepondTest {
     }
 
     @Test
+    fun lifecycleFlushRequestDuringRetryExhaustionSchedulesOneFollowUp() = runTest {
+        val transport = FakeTransport(
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Failure,
+            FakeOutcome.Response(202),
+        )
+        lateinit var client: Pulsepond
+        client = client(
+            transport = transport,
+            batchSize = 1,
+            flushIntervalMilliseconds = 0,
+            coroutineScope = this,
+            diagnosticListener = PulsepondDiagnosticListener { diagnostic ->
+                if (diagnostic.code == PulsepondDiagnosticCode.RetryExhausted) {
+                    client.requestFlush()
+                }
+            },
+        )
+
+        client.track("retry_from_callback")
+        advanceUntilIdle()
+
+        assertEquals(7, transport.bodies.size)
+        assertEquals(0, client.pendingEventCount())
+        client.shutdown()
+    }
+
+    @Test
     fun boundedQueueFailsClosedAndEmitsOnlyRedactedDiagnostics() = runTest {
         val transport = FakeTransport(FakeOutcome.Response(202))
         val diagnostics = mutableListOf<PulsepondDiagnostic>()
@@ -781,6 +813,7 @@ private fun client(
     flushIntervalMilliseconds: Long = 0,
     coroutineScope: kotlinx.coroutines.CoroutineScope? = null,
     persistence: EventPersistence = VolatileEventPersistence,
+    diagnosticListener: PulsepondDiagnosticListener? = null,
 ): Pulsepond {
     var now = 1_800_000_000_000L
     var randomByte = 0
@@ -795,7 +828,7 @@ private fun client(
             batchSize = batchSize,
             flushIntervalMilliseconds = flushIntervalMilliseconds,
             maxQueueSize = maxQueueSize,
-            diagnosticListener = PulsepondDiagnosticListener { diagnostic ->
+            diagnosticListener = diagnosticListener ?: PulsepondDiagnosticListener { diagnostic ->
                 diagnostics += diagnostic
             },
         ),
