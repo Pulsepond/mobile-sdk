@@ -11,7 +11,8 @@ required_secrets=(
 missing_secrets=()
 
 for secret_name in "${required_secrets[@]}"; do
-  if [[ -z "${!secret_name:-}" ]]; then
+  configured_flag="${secret_name}_CONFIGURED"
+  if [[ "${!configured_flag:-false}" != "true" ]]; then
     missing_secrets+=("$secret_name")
   fi
 done

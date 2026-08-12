@@ -8,7 +8,7 @@ Pulsepond Mobile SDK publishes Android artifacts to Maven Central and attaches t
 - `SIGNING_PASSWORD`
 - `GPG_KEY_CONTENTS`
 
-The release workflow checks only whether each value is present and never prints a secret. It stops before build, signing, or upload when configuration is incomplete.
+The release workflow passes only configured/not-configured flags to the preflight script; the script never receives or prints a secret value. It stops before build, signing, or upload when configuration is incomplete. The actual credentials are exposed only to the final Maven publication step.
 
 ## Prepare a release
 
