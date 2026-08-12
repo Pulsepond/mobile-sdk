@@ -23,3 +23,5 @@ When intentionally changing a public API, review the source and binary compatibi
 ```
 
 Keep changes focused. New collection must be explicit, bounded, documented, covered by protocol tests, and must not expand diagnostic payloads with event or credential data.
+
+Maintainers should follow the [release checklist](docs/RELEASING.md) before publishing a tag.
