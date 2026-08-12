@@ -86,7 +86,10 @@ private class BlockingFirstReplacePersistence : EventPersistence {
     override fun load(newInstallationId: () -> String): PersistedState =
         PersistedState(newInstallationId(), emptyList())
 
-    override fun append(event: EventRecord, currentEvents: List<EventRecord>): Unit = Unit
+    override fun append(
+        event: EventRecord,
+        currentEvents: List<EventRecord>,
+    ): AppendPersistenceResult = AppendPersistenceResult.AppendedEvent
 
     override fun replace(events: List<EventRecord>) {
         when (replaceCalls.incrementAndGet()) {

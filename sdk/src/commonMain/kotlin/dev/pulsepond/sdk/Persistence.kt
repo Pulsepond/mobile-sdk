@@ -31,7 +31,7 @@ internal interface EventPersistence {
 
     fun load(newInstallationId: () -> String): PersistedState
 
-    fun append(event: EventRecord, currentEvents: List<EventRecord>)
+    fun append(event: EventRecord, currentEvents: List<EventRecord>): AppendPersistenceResult
 
     fun replace(events: List<EventRecord>)
 
@@ -40,8 +40,16 @@ internal interface EventPersistence {
 
 internal data class PersistenceResetResult(val completed: Boolean)
 
+internal enum class AppendPersistenceResult {
+    AppendedEvent,
+    ReplacedSnapshot,
+}
+
 private sealed interface PersistenceCommand {
-    data class Append(val event: EventRecord) : PersistenceCommand
+    data class Append(
+        val event: EventRecord,
+        val revision: Long,
+    ) : PersistenceCommand
 
     data class Replace(
         val events: List<EventRecord>,
@@ -65,8 +73,8 @@ internal class PersistenceWriter(
     scope: CoroutineScope,
     capacity: Int,
     private val onFailure: () -> Unit,
-    private val onAppendPersisted: (String) -> Unit,
-    private val onSnapshotPersisted: (Long, List<String>) -> Unit,
+    private val onAppendPersisted: (Long, String) -> Unit,
+    private val onSnapshotPersisted: (Long, List<String>, Boolean) -> Unit,
 ) {
     private val commands: Channel<PersistenceCommand> = Channel(capacity)
     private val job = scope.launch {
@@ -76,8 +84,18 @@ internal class PersistenceWriter(
                 is PersistenceCommand.Append -> {
                     currentEvents += command.event
                     try {
-                        persistence.append(command.event, currentEvents)
-                        onAppendPersisted(command.event.eventId)
+                        when (persistence.append(command.event, currentEvents)) {
+                            AppendPersistenceResult.AppendedEvent -> {
+                                onAppendPersisted(command.revision, command.event.eventId)
+                            }
+                            AppendPersistenceResult.ReplacedSnapshot -> {
+                                onSnapshotPersisted(
+                                    command.revision,
+                                    currentEvents.map(EventRecord::eventId),
+                                    false,
+                                )
+                            }
+                        }
                     } catch (_: PulsepondStorageException) {
                         onFailure()
                     }
@@ -91,6 +109,7 @@ internal class PersistenceWriter(
                             onSnapshotPersisted(
                                 command.revision,
                                 command.events.map(EventRecord::eventId),
+                                true,
                             )
                             true
                         } catch (_: PulsepondStorageException) {
@@ -117,8 +136,8 @@ internal class PersistenceWriter(
         }
     }
 
-    fun tryAppend(event: EventRecord): Boolean {
-        return commands.trySend(PersistenceCommand.Append(event)).isSuccess
+    fun tryAppend(event: EventRecord, revision: Long): Boolean {
+        return commands.trySend(PersistenceCommand.Append(event, revision)).isSuccess
     }
 
     fun tryReplace(
@@ -192,7 +211,10 @@ internal object VolatileEventPersistence : EventPersistence {
     override fun load(newInstallationId: () -> String): PersistedState =
         PersistedState(newInstallationId(), emptyList())
 
-    override fun append(event: EventRecord, currentEvents: List<EventRecord>) = Unit
+    override fun append(
+        event: EventRecord,
+        currentEvents: List<EventRecord>,
+    ): AppendPersistenceResult = AppendPersistenceResult.AppendedEvent
 
     override fun replace(events: List<EventRecord>) = Unit
 
@@ -272,16 +294,18 @@ internal class FileEventPersistence(
     override fun append(
         event: EventRecord,
         currentEvents: List<EventRecord>,
-    ): Unit = storageOperation("append") {
+    ): AppendPersistenceResult = storageOperation("append") {
         val journal = journal(requireInstallationId())
         val line = persistedLine(event)
         val currentSize = fileSystem.metadataOrNull(journal)?.size ?: 0
         if (currentSize + line.encodeToByteArray().size > maximumJournalBytes) {
             replace(currentEvents)
+            AppendPersistenceResult.ReplacedSnapshot
         } else {
             fileSystem.appendingSink(journal, mustExist = false).buffer().use { sink ->
                 sink.writeUtf8(line)
             }
+            AppendPersistenceResult.AppendedEvent
         }
     }
 

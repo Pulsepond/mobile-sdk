@@ -241,8 +241,9 @@ class PersistenceTest {
                 persistence.append(currentEvents.single(), currentEvents)
             }
         }
-        persistence.append(currentEvents.single(), currentEvents)
+        val result = persistence.append(currentEvents.single(), currentEvents)
 
+        assertEquals(AppendPersistenceResult.ReplacedSnapshot, result)
         assertTrue(delegate.metadata(journal).size!! <= maximumJournalBytes)
         val restored = FileEventPersistence(fileSystem, directory).load { installationIdTwo }
         assertEquals(currentEvents, restored.events)
