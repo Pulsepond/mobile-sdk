@@ -17,12 +17,14 @@ internal sealed interface EventPropertyValue {
 public class PulsepondProperties public constructor() {
     private val values: MutableMap<String, EventPropertyValue> = linkedMapOf()
 
+    @Throws(PulsepondValidationException::class)
     public fun setString(key: String, value: String): PulsepondProperties = apply {
         validateKey(key)
         validatePrintableText("string property", value, 256)
         put(key, EventPropertyValue.Text(value))
     }
 
+    @Throws(PulsepondValidationException::class)
     public fun setInteger(key: String, value: Long): PulsepondProperties = apply {
         validateKey(key)
         if (value !in -maxSafeInteger..maxSafeInteger) {
@@ -31,11 +33,13 @@ public class PulsepondProperties public constructor() {
         put(key, EventPropertyValue.Integer(value))
     }
 
+    @Throws(PulsepondValidationException::class)
     public fun setBoolean(key: String, value: Boolean): PulsepondProperties = apply {
         validateKey(key)
         put(key, EventPropertyValue.Flag(value))
     }
 
+    @Throws(PulsepondValidationException::class)
     public fun setNull(key: String): PulsepondProperties = apply {
         validateKey(key)
         put(key, EventPropertyValue.Null)

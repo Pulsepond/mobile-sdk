@@ -1,17 +1,26 @@
 package dev.pulsepond.sdk
 
+import io.ktor.http.fromHttpToGmtDate
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.selects.select
 import kotlin.time.Clock
 
 private const val maxPropertiesJsonBytes: Int = 20_000
@@ -29,6 +38,7 @@ private data class Batch(
     val events: List<QueuedEvent>,
     val body: String,
     val generation: Long,
+    val invalidation: Deferred<Unit>,
 )
 
 private sealed interface DeliveryResult {
@@ -39,6 +49,16 @@ private sealed interface DeliveryResult {
     data class Rejected(val status: Int) : DeliveryResult
 
     data object RetryExhausted : DeliveryResult
+
+    data object Invalidated : DeliveryResult
+}
+
+private sealed interface TransportAttempt {
+    data class Completed(val response: TransportResponse) : TransportAttempt
+
+    data object Failed : TransportAttempt
+
+    data object Invalidated : TransportAttempt
 }
 
 /**
@@ -54,6 +74,7 @@ public class Pulsepond internal constructor(
     private val randomBytes: (ByteArray) -> Unit,
     coroutineScope: CoroutineScope? = null,
 ) {
+    @Throws(PulsepondConfigurationException::class)
     public constructor(configuration: PulsepondConfiguration) : this(
         configuration = configuration,
         transport = KtorEventTransport(configuration),
@@ -71,16 +92,20 @@ public class Pulsepond internal constructor(
     private val identity: IdentityManager = IdentityManager(randomBytes, nowMilliseconds())
     private var queueBytes: Int = 0
     private var generation: Long = 0
+    private var generationInvalidation: CompletableDeferred<Unit> = CompletableDeferred()
     private var effectiveBatchSize: Int = configuration.batchSize
     private var automaticFlushScheduled: Boolean = false
     private var immediateFlushScheduled: Boolean = false
     private var closing: Boolean = false
     private var closed: Boolean = false
+    private var shutdownCompletion: CompletableDeferred<Unit>? = null
 
     /** Enqueues an event and returns its UUIDv7, or null when the bounded queue is full. */
+    @Throws(PulsepondValidationException::class, PulsepondConfigurationException::class)
     public fun track(eventName: String): String? = track(eventName, null)
 
     /** Enqueues an event with a defensive copy of its bounded, flat properties. */
+    @Throws(PulsepondValidationException::class, PulsepondConfigurationException::class)
     public fun track(eventName: String, properties: PulsepondProperties?): String? {
         validateSlug("eventName", eventName, 64)
         val propertySnapshot = properties?.snapshot().orEmpty()
@@ -150,6 +175,7 @@ public class Pulsepond internal constructor(
     }
 
     /** Attempts to deliver every event that can be processed within bounded batches. */
+    @Throws(CancellationException::class)
     public suspend fun flush(): Unit = flushLock.withLock {
         if (synchronized(stateLock) { closed }) return@withLock
         val staleEvents = dropStaleEvents()
@@ -204,16 +230,20 @@ public class Pulsepond internal constructor(
                         ),
                     )
                 }
+                DeliveryResult.Invalidated -> Unit
             }
         }
     }
 
     /** Discards unsent events and rotates the in-memory installation and session identifiers. */
+    @Throws(PulsepondConfigurationException::class)
     public fun reset() {
         val now = nowMilliseconds()
         synchronized(stateLock) {
             if (closed) return
+            generationInvalidation.complete(Unit)
             generation += 1
+            generationInvalidation = CompletableDeferred()
             queue.clear()
             queueBytes = 0
             effectiveBatchSize = configuration.batchSize
@@ -221,37 +251,61 @@ public class Pulsepond internal constructor(
         }
     }
 
-    /** Makes one final bounded delivery attempt and permanently closes the client. */
+    /** Makes one final bounded delivery attempt, closes the client, and joins concurrent callers. */
+    @Throws(CancellationException::class)
     public suspend fun shutdown() {
-        val shouldClose = synchronized(stateLock) {
-            if (closing || closed) {
-                false
-            } else {
+        var initiatesShutdown = false
+        val completion = synchronized(stateLock) {
+            shutdownCompletion ?: CompletableDeferred<Unit>().also {
+                shutdownCompletion = it
                 closing = true
-                true
+                initiatesShutdown = true
             }
         }
-        if (!shouldClose) return
-        flush()
-        val droppedEvents = synchronized(stateLock) {
-            val count = queue.size
-            queue.clear()
-            queueBytes = 0
-            closed = true
-            closing = false
-            count
+        if (!initiatesShutdown) {
+            completion.await()
+            return
         }
-        if (droppedEvents > 0) {
-            notify(
-                PulsepondDiagnostic(
-                    code = PulsepondDiagnosticCode.DeliveryFailed,
-                    droppedEvents = droppedEvents,
-                    retryable = false,
-                ),
-            )
+
+        var failure: Throwable? = null
+        try {
+            flush()
+        } catch (error: Throwable) {
+            failure = error
         }
-        transport.close()
-        if (ownsScope) scope.cancel()
+
+        withContext(NonCancellable) {
+            synchronized(stateLock) {
+                generationInvalidation.complete(Unit)
+                generation += 1
+            }
+            flushLock.withLock {
+                val droppedEvents = synchronized(stateLock) {
+                    val count = queue.size
+                    queue.clear()
+                    queueBytes = 0
+                    closed = true
+                    closing = false
+                    count
+                }
+                if (droppedEvents > 0) {
+                    notify(
+                        PulsepondDiagnostic(
+                            code = PulsepondDiagnosticCode.DeliveryFailed,
+                            droppedEvents = droppedEvents,
+                            retryable = false,
+                        ),
+                    )
+                }
+                try {
+                    transport.close()
+                } finally {
+                    if (ownsScope) scope.cancel()
+                    completion.complete(Unit)
+                }
+            }
+        }
+        failure?.let { throw it }
     }
 
     internal fun pendingEventCount(): Int = synchronized(stateLock) { queue.size }
@@ -351,18 +405,18 @@ public class Pulsepond internal constructor(
             selected += item
             body = candidateBody
         }
-        Batch(selected, body, generation)
+        Batch(selected, body, generation, generationInvalidation)
     }
 
     private suspend fun deliver(batch: Batch): DeliveryResult {
         var attempts = 0
         while (true) {
-            val response = try {
-                transport.post(batch.body)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Throwable) {
-                null
+            val attempt = postBatch(batch)
+            if (attempt == TransportAttempt.Invalidated) return DeliveryResult.Invalidated
+            val response = when (attempt) {
+                is TransportAttempt.Completed -> attempt.response
+                TransportAttempt.Failed -> null
+                TransportAttempt.Invalidated -> return DeliveryResult.Invalidated
             }
             if (response?.status == 202) return DeliveryResult.Accepted
             if (response?.status == 413) return DeliveryResult.TooLarge
@@ -384,8 +438,40 @@ public class Pulsepond internal constructor(
                     status = response?.status,
                 ),
             )
-            delay(retryDelayMilliseconds(attempts, response?.retryAfter))
+            val shouldRetry = waitForRetry(
+                batch,
+                retryDelayMilliseconds(attempts, response?.retryAfter),
+            )
+            if (!shouldRetry) return DeliveryResult.Invalidated
         }
+    }
+
+    private suspend fun postBatch(batch: Batch): TransportAttempt = coroutineScope<TransportAttempt> {
+        if (batch.invalidation.isCompleted) return@coroutineScope TransportAttempt.Invalidated
+        val request = async {
+            try {
+                TransportAttempt.Completed(transport.post(batch.body))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                TransportAttempt.Failed
+            }
+        }
+        select {
+            request.onAwait { it }
+            batch.invalidation.onAwait {
+                request.cancel()
+                TransportAttempt.Invalidated
+            }
+        }
+    }
+
+    private suspend fun waitForRetry(batch: Batch, delayMilliseconds: Long): Boolean {
+        if (batch.invalidation.isCompleted) return false
+        return withTimeoutOrNull(delayMilliseconds) {
+            batch.invalidation.await()
+            false
+        } ?: true
     }
 
     private fun retryDelayMilliseconds(attempt: Int, retryAfter: String?): Long {
@@ -397,6 +483,13 @@ public class Pulsepond internal constructor(
             } else {
                 retryAfterSeconds.coerceAtMost(maxRetryDelayMilliseconds / 1_000) * 1_000
             }
+        }
+        val retryAtMilliseconds = runCatching {
+            trimmedRetryAfter?.fromHttpToGmtDate()?.timestamp
+        }.getOrNull()
+        if (retryAtMilliseconds != null) {
+            return (retryAtMilliseconds - nowMilliseconds())
+                .coerceIn(0, maxRetryDelayMilliseconds)
         }
         val ceiling = minOf(
             maxRetryDelayMilliseconds,

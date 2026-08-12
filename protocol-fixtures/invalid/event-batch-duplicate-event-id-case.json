@@ -1,0 +1,24 @@
+{
+  "events": [
+    {
+      "event_id": "01890f3e-e4b8-7cc3-98c8-7f0d7b4c9a10",
+      "schema_version": 1,
+      "event_name": "app_open",
+      "occurred_at": "2026-07-21T07:00:00.123Z",
+      "platform": "web",
+      "environment": "production",
+      "anonymous_installation_id": "550e8400-e29b-41d4-a716-446655440000",
+      "session_id": "01890f3e-e4b8-7cc3-98c8-7f0d7b4c9a11"
+    },
+    {
+      "event_id": "01890F3E-E4B8-7CC3-98C8-7F0D7B4C9A10",
+      "schema_version": 1,
+      "event_name": "view_home",
+      "occurred_at": "2026-07-21T07:00:01.123Z",
+      "platform": "web",
+      "environment": "production",
+      "anonymous_installation_id": "550e8400-e29b-41d4-a716-446655440000",
+      "session_id": "01890f3e-e4b8-7cc3-98c8-7f0d7b4c9a11"
+    }
+  ]
+}

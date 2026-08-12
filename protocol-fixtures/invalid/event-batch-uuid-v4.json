@@ -1,0 +1,14 @@
+{
+  "events": [
+    {
+      "event_id": "550e8400-e29b-41d4-a716-446655440000",
+      "schema_version": 1,
+      "event_name": "app_open",
+      "occurred_at": "2026-07-21T07:00:00.123Z",
+      "platform": "web",
+      "environment": "production",
+      "anonymous_installation_id": "install_01J1EXAMPLE",
+      "session_id": "session_01J1EXAMPLE"
+    }
+  ]
+}

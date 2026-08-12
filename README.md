@@ -56,8 +56,8 @@ Download `Pulsepond.xcframework.zip` from a release, verify the published SHA-25
 ```swift
 import Pulsepond
 
-let analytics = Pulsepond(
-    configuration: PulsepondConfiguration(
+let analytics = try Pulsepond(
+    configuration: try PulsepondConfiguration(
         endpoint: "https://pulsepond.example.com/v1/batch",
         writeKey: "ppw_v1_...",
         environment: "production",
@@ -71,13 +71,13 @@ let analytics = Pulsepond(
     )
 )
 
-analytics.track(
+try analytics.track(
     eventName: "view_work",
-    properties: PulsepondProperties().setString(key: "work_id", value: "work_123")
+    properties: try PulsepondProperties().setString(key: "work_id", value: "work_123")
 )
 ```
 
-The generated Swift declarations are validated on macOS CI. A thin hand-written Swift façade and Swift Package Manager distribution are planned before the first stable release.
+Validation failures cross the generated Objective-C boundary as Swift errors, so configuration, property setters, tracking, flush, and shutdown use `try`. A real Swift consumer is type-checked against the release XCFramework on macOS CI. A hand-written convenience façade and Swift Package Manager distribution are planned before the first stable release.
 
 ## Contract and delivery
 

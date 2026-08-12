@@ -49,3 +49,5 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
       - name: Test iOS and build XCFramework
         run: ./gradlew :sdk:iosSimulatorArm64Test :sdk:assemblePulsepondReleaseXCFramework
+      - name: Compile Swift consumer
+        run: ./scripts/check-swift-api.sh

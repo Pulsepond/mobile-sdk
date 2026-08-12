@@ -56,6 +56,10 @@ kotlin {
             implementation(libs.ktor.client.okhttp)
         }
 
+        getByName("androidHostTest") {
+            resources.srcDir(rootProject.layout.projectDirectory.dir("protocol-fixtures"))
+        }
+
         iosMain.dependencies {
             implementation(libs.ktor.client.darwin)
         }

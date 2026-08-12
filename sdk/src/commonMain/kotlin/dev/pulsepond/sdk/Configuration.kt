@@ -6,7 +6,8 @@ import io.ktor.http.Url
 private val writeKeyPattern = Regex("^ppw_v1_[0-9a-f]{32}_[0-9a-f]{64}$")
 
 /** Immutable configuration for one source-scoped Pulsepond client. */
-public class PulsepondConfiguration public constructor(
+public class PulsepondConfiguration @Throws(PulsepondConfigurationException::class)
+public constructor(
     public val endpoint: String,
     public val writeKey: String,
     public val environment: String,

@@ -34,6 +34,8 @@ jobs:
           echo "VERSION_NAME=$version" >> "$GITHUB_ENV"
       - name: Test and build release artifacts
         run: ./gradlew :sdk:testAndroidHostTest :sdk:iosSimulatorArm64Test :sdk:checkKotlinAbi :sdk:assemblePulsepondReleaseXCFramework
+      - name: Compile Swift consumer
+        run: ./scripts/check-swift-api.sh
       - name: Package Apple artifact
         shell: bash
         run: |
@@ -42,9 +44,32 @@ jobs:
             Pulsepond.xcframework.zip
           shasum -a 256 Pulsepond.xcframework.zip > Pulsepond.xcframework.zip.sha256
       - name: Attach Apple artifact and checksum
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" Pulsepond.xcframework.zip Pulsepond.xcframework.zip.sha256 --clobber
+        run: |
+          archive="Pulsepond.xcframework.zip"
+          checksum="Pulsepond.xcframework.zip.sha256"
+          assets="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
+          archive_exists=false
+          checksum_exists=false
+          grep -Fxq "$archive" <<< "$assets" && archive_exists=true
+          grep -Fxq "$checksum" <<< "$assets" && checksum_exists=true
+          if [[ "$archive_exists" == true && "$checksum_exists" == true ]]; then
+            mkdir existing-assets
+            gh release download "$GITHUB_REF_NAME" \
+              --pattern "$archive" \
+              --pattern "$checksum" \
+              --dir existing-assets
+            cmp "$archive" "existing-assets/$archive"
+            cmp "$checksum" "existing-assets/$checksum"
+            echo "Existing release assets are byte-identical; continuing the retry."
+          elif [[ "$archive_exists" == false && "$checksum_exists" == false ]]; then
+            gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum"
+          else
+            echo "Release contains an incomplete Pulsepond XCFramework asset pair." >&2
+            exit 1
+          fi
       - name: Publish Android artifact to Maven Central
         run: ./gradlew :sdk:publishToMavenCentral --no-configuration-cache
         env:

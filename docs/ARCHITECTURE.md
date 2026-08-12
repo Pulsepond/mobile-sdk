@@ -30,7 +30,11 @@ A flush removes data only after a terminal outcome:
 - `408`, `429`, `5xx`, or transport failure: retry with bounded jitter, then drop with a diagnostic;
 - other status: reject without retry.
 
-`reset` increments a generation number before clearing queued events and rotating identifiers. An in-flight batch from an older generation can finish its network request but cannot remove new events.
+`reset` completes the current generation invalidation signal before clearing queued events and rotating identifiers. An in-flight request is cancelled on a best-effort basis, and an older generation can never retry or remove new events. This matters when reset represents logout or consent withdrawal.
+
+`shutdown` has one shared completion signal. Concurrent callers join the same close operation, and cancellation of the initiating caller still runs queue, transport, and owned-scope cleanup before propagating cancellation.
+
+The canonical protocol schema and complete event-batch fixture set are commit-pinned in `protocol-fixtures`. Android host tests consume that independent snapshot, while macOS CI compiles a real Swift consumer against the assembled XCFramework so Objective-C export changes cannot silently invalidate the documented API.
 
 ## Current limitations
 

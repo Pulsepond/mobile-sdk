@@ -1,14 +1,22 @@
 package dev.pulsepond.sdk
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -56,6 +64,22 @@ class PulsepondTest {
         assertEquals(1, transport.bodies.distinct().size)
         assertEquals(0, client.pendingEventCount())
         assertEquals(2, diagnostics.count { it.code == PulsepondDiagnosticCode.DeliveryFailed })
+        client.shutdown()
+    }
+
+    @Test
+    fun httpDateRetryAfterUsesTheBoundedServerDelay() = runTest {
+        val transport = FakeTransport(
+            FakeOutcome.Response(429, "Fri, 15 Jan 2027 08:00:20 GMT"),
+            FakeOutcome.Response(202),
+        )
+        val client = client(transport)
+        client.track("audio_play")
+
+        client.flush()
+
+        assertEquals(2, transport.bodies.size)
+        assertTrue(testScheduler.currentTime in 19_000..20_000)
         client.shutdown()
     }
 
@@ -131,6 +155,42 @@ class PulsepondTest {
         assertNotEquals(anonymousId(firstBody), anonymousId(secondBody))
         client.shutdown()
     }
+
+    @Test
+    fun resetCancelsAnInFlightBodyAndNeverRetriesIt() = runTest {
+        val transport = ResetAwareTransport()
+        val client = client(transport)
+        client.track("before_reset")
+        val flush = launch { client.flush() }
+        transport.firstStarted.await()
+
+        client.reset()
+        client.track("after_reset")
+        flush.join()
+
+        transport.firstCancelled.await()
+        assertEquals(listOf("before_reset", "after_reset"), transport.bodies.map(::eventName))
+        assertEquals(0, client.pendingEventCount())
+        client.shutdown()
+    }
+
+    @Test
+    fun cancelledShutdownStillClosesAndConcurrentCallersJoinIt() = runTest {
+        val transport = BlockingTransport()
+        val client = client(transport)
+        client.track("pending")
+        val first = launch { client.shutdown() }
+        transport.started.await()
+        val second = async { client.shutdown() }
+        yield()
+        assertFalse(second.isCompleted)
+
+        first.cancelAndJoin()
+        second.await()
+
+        assertTrue(transport.closed)
+        assertFailsWith<PulsepondValidationException> { client.track("too_late") }
+    }
 }
 
 private sealed interface FakeOutcome {
@@ -162,6 +222,34 @@ private class FakeTransport(vararg outcomes: FakeOutcome) : RecordingTransport()
             is FakeOutcome.Response -> TransportResponse(outcome.status, outcome.retryAfter)
             FakeOutcome.Failure -> error("network unavailable")
         }
+    }
+}
+
+private class ResetAwareTransport : RecordingTransport() {
+    val firstStarted: CompletableDeferred<Unit> = CompletableDeferred()
+    val firstCancelled: CompletableDeferred<Unit> = CompletableDeferred()
+
+    override suspend fun post(body: String): TransportResponse {
+        bodies += body
+        if (bodies.size == 1) {
+            firstStarted.complete(Unit)
+            try {
+                awaitCancellation()
+            } finally {
+                firstCancelled.complete(Unit)
+            }
+        }
+        return TransportResponse(202, null)
+    }
+}
+
+private class BlockingTransport : RecordingTransport() {
+    val started: CompletableDeferred<Unit> = CompletableDeferred()
+
+    override suspend fun post(body: String): TransportResponse {
+        bodies += body
+        started.complete(Unit)
+        awaitCancellation()
     }
 }
 
@@ -206,6 +294,10 @@ private fun eventIds(body: String): List<String> =
     Json.parseToJsonElement(body).jsonObject["events"]!!.jsonArray.map { event ->
         event.jsonObject["event_id"]!!.jsonPrimitive.content
     }
+
+private fun eventName(body: String): String =
+    Json.parseToJsonElement(body).jsonObject["events"]!!.jsonArray.single()
+        .jsonObject["event_name"]!!.jsonPrimitive.content
 
 private fun anonymousId(body: String): String =
     Json.parseToJsonElement(body).jsonObject["events"]!!.jsonArray.single()
