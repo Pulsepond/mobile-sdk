@@ -433,10 +433,18 @@ public class Pulsepond internal constructor(
                         else -> tryPersistCurrentQueueLocked()
                     }
                 }
-                val pendingEventsPersisted = when {
+                var pendingEventsPersisted = when {
                     !persistence.isDurable -> pendingSnapshot.events.isEmpty()
                     pendingSnapshot.completion == null -> true
                     else -> awaitQueueSnapshot(pendingSnapshot)
+                }
+                if (
+                    persistence.isDurable &&
+                    !pendingEventsPersisted
+                ) {
+                    pendingEventsPersisted = synchronized(stateLock) {
+                        isCurrentQueueDurableLocked()
+                    }
                 }
                 val uncoveredEvents = synchronized(stateLock) {
                     pendingSnapshot.events.count { it.eventId !in durableEventIds }
