@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -61,7 +62,7 @@ class ShutdownDurabilityRaceTest {
         runCurrent()
 
         initiator.cancel()
-        runCurrent()
+        yield()
         persistence.releaseFirstReplace.countDown()
 
         initiator.join()
