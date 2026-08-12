@@ -45,6 +45,7 @@ private sealed interface PersistenceCommand {
 
     data class Replace(
         val events: List<EventRecord>,
+        val revision: Long,
         val completion: CompletableDeferred<Boolean>,
     ) : PersistenceCommand
 
@@ -64,6 +65,8 @@ internal class PersistenceWriter(
     scope: CoroutineScope,
     capacity: Int,
     private val onFailure: () -> Unit,
+    private val onAppendPersisted: (String) -> Unit,
+    private val onSnapshotPersisted: (Long, List<String>) -> Unit,
 ) {
     private val commands: Channel<PersistenceCommand> = Channel(capacity)
     private val job = scope.launch {
@@ -74,6 +77,7 @@ internal class PersistenceWriter(
                     currentEvents += command.event
                     try {
                         persistence.append(command.event, currentEvents)
+                        onAppendPersisted(command.event.eventId)
                     } catch (_: PulsepondStorageException) {
                         onFailure()
                     }
@@ -84,6 +88,10 @@ internal class PersistenceWriter(
                     command.completion.complete(
                         try {
                             persistence.replace(command.events)
+                            onSnapshotPersisted(
+                                command.revision,
+                                command.events.map(EventRecord::eventId),
+                            )
                             true
                         } catch (_: PulsepondStorageException) {
                             false
@@ -113,10 +121,15 @@ internal class PersistenceWriter(
         return commands.trySend(PersistenceCommand.Append(event)).isSuccess
     }
 
-    fun tryReplace(events: List<EventRecord>): CompletableDeferred<Boolean>? {
+    fun tryReplace(
+        events: List<EventRecord>,
+        revision: Long,
+    ): CompletableDeferred<Boolean>? {
         val completion = CompletableDeferred<Boolean>()
         return if (
-            commands.trySend(PersistenceCommand.Replace(events.toList(), completion)).isSuccess
+            commands.trySend(
+                PersistenceCommand.Replace(events.toList(), revision, completion),
+            ).isSuccess
         ) {
             completion
         } else {
@@ -126,18 +139,6 @@ internal class PersistenceWriter(
 
     suspend fun awaitReplace(completion: CompletableDeferred<Boolean>): Boolean {
         return try {
-            completion.await()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    suspend fun replace(events: List<EventRecord>): Boolean {
-        val completion = CompletableDeferred<Boolean>()
-        return try {
-            commands.send(PersistenceCommand.Replace(events.toList(), completion))
             completion.await()
         } catch (error: CancellationException) {
             throw error

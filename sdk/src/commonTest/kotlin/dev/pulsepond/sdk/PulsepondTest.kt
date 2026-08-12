@@ -438,7 +438,7 @@ class PulsepondTest {
         assertFailsWith<PulsepondStorageException> { client.shutdown() }
         assertEquals(3, persistence.replaceCalls)
         val loss = diagnostics.last { it.code == PulsepondDiagnosticCode.DeliveryFailed }
-        assertEquals(2, loss.droppedEvents)
+        assertEquals(1, loss.droppedEvents)
         assertFalse(loss.retryable)
     }
 }
