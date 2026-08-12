@@ -18,7 +18,7 @@ The release workflow passes only configured/not-configured flags to the prefligh
 4. Create a draft GitHub release for that existing tag and review its notes.
 5. Publish the GitHub release.
 
-The workflow checks out the fully qualified tag, proves `HEAD` matches the tag commit, derives the Maven version from the tag, and builds both platform artifacts. It then:
+The workflow checks out the fully qualified tag without persisting GitHub credentials, proves `HEAD` matches the tag commit, and requires that commit to be reachable from `origin/main` before any repository script runs. It derives the Maven version from the tag and builds both platform artifacts. It then:
 
 1. packages and verifies `Pulsepond.xcframework.zip`;
 2. uploads the Apple archive, SHA-256 file, and commit-bound provenance without overwriting an existing asset set;

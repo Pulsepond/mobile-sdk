@@ -15,7 +15,32 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
+          fetch-depth: 0
+          persist-credentials: false
           ref: refs/tags/${{ github.event.release.tag_name }}
+      - name: Validate release source
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must be v<semver> or <semver>." >&2
+            exit 1
+          fi
+          head_commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          main_commit="$(git rev-parse refs/remotes/origin/main^{commit})"
+          if [[ "$head_commit" != "$tag_commit" ]]; then
+            echo "Checked-out commit does not match the release tag." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$tag_commit" "$main_commit"; then
+            echo "Release tag commit is not reachable from origin/main." >&2
+            exit 1
+          fi
+          echo "ORG_GRADLE_PROJECT_pulsepondVersion=$version" >> "$GITHUB_ENV"
+          echo "PULSEPOND_RELEASE_COMMIT=$tag_commit" >> "$GITHUB_ENV"
       - name: Verify release credentials
         env:
           MAVEN_CENTRAL_USERNAME_CONFIGURED: ${{ secrets.MAVEN_CENTRAL_USERNAME != '' }}
@@ -33,24 +58,6 @@ jobs:
           java-version: "21"
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
-      - name: Validate release version
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          version="${RELEASE_TAG#v}"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Release tag must be v<semver> or <semver>." >&2
-            exit 1
-          fi
-          head_commit="$(git rev-parse HEAD)"
-          tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
-          if [[ "$head_commit" != "$tag_commit" ]]; then
-            echo "Checked-out commit does not match the release tag." >&2
-            exit 1
-          fi
-          echo "ORG_GRADLE_PROJECT_pulsepondVersion=$version" >> "$GITHUB_ENV"
-          echo "PULSEPOND_RELEASE_COMMIT=$tag_commit" >> "$GITHUB_ENV"
       - name: Test and build release artifacts
         run: ./gradlew :sdk:testAndroidHostTest :sdk:iosSimulatorArm64Test :sdk:checkKotlinAbi :sdk:assemblePulsepondReleaseXCFramework
       - name: Package and compile Apple artifact consumer
