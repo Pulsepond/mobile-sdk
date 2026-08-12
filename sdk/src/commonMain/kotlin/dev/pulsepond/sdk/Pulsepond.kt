@@ -23,7 +23,6 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.selects.select
 import kotlin.time.Clock
 
-private const val maxPropertiesJsonBytes: Int = 20_000
 private const val maxRetries: Int = 5
 private const val maxRetryDelayMilliseconds: Long = 30_000
 private const val retryBaseDelayMilliseconds: Long = 1_000
@@ -78,6 +77,7 @@ public class Pulsepond internal constructor(
     private val nowMilliseconds: () -> Long,
     private val randomBytes: (ByteArray) -> Unit,
     private val persistence: EventPersistence = VolatileEventPersistence,
+    private val ownershipLease: ClientOwnershipLease? = null,
     coroutineScope: CoroutineScope? = null,
 ) {
     private val stateLock: SynchronizedObject = SynchronizedObject()
@@ -116,9 +116,17 @@ public class Pulsepond internal constructor(
     private var automaticFlushScheduled: Boolean = false
     private var immediateFlushScheduled: Boolean = false
     private var deliveryDeferred: Boolean = false
+    private var resetting: Boolean = false
     private var closing: Boolean = false
     private var closed: Boolean = false
     private var shutdownCompletion: CompletableDeferred<Unit>? = null
+    private val persistenceWriter: PersistenceWriter = PersistenceWriter(
+        persistence = persistence,
+        initialEvents = queue.map(QueuedEvent::event),
+        scope = scope,
+        capacity = configuration.maxQueueSize + 16,
+        onFailure = ::notifyStorageFailure,
+    )
 
     init {
         val discardedRecords = persistedState.events.size - queue.size
@@ -157,15 +165,14 @@ public class Pulsepond internal constructor(
     public fun track(eventName: String, properties: PulsepondProperties?): String? {
         validateSlug("eventName", eventName, 64)
         val propertySnapshot = properties?.snapshot().orEmpty()
-        validatePropertyBytes(propertySnapshot)
         val now = nowMilliseconds()
         var requestTimedFlush = false
         var requestImmediateFlush = false
         var storageFailed = false
         val eventId = synchronized(stateLock) {
-            if (closing || closed) {
+            if (resetting || closing || closed) {
                 throw PulsepondValidationException(
-                    "Pulsepond cannot track after shutdown has started",
+                    "Pulsepond cannot track while reset or shutdown is in progress",
                 )
             }
             if (queue.size >= configuration.maxQueueSize || queueBytes >= maxQueueBytes) {
@@ -185,16 +192,12 @@ public class Pulsepond internal constructor(
                     anonymousInstallationId = currentIdentity.anonymousInstallationId,
                     sessionId = currentIdentity.sessionId,
                     properties = propertySnapshot,
-                )
+                ).also(::validateEventRecord)
                 val serializedBytes = event.json().toString().encodeToByteArray().size
                 if (queueBytes + serializedBytes > maxQueueBytes) {
                     null
                 } else {
-                    try {
-                        persistence.append(event)
-                    } catch (_: PulsepondStorageException) {
-                        storageFailed = true
-                    }
+                    storageFailed = !persistenceWriter.tryAppend(event)
                     queue += QueuedEvent(event, serializedBytes)
                     queueBytes += serializedBytes
                     deliveryDeferred = false
@@ -302,21 +305,48 @@ public class Pulsepond internal constructor(
     }
 
     /** Discards unsent events and atomically rotates the installation and session identifiers. */
-    @Throws(PulsepondConfigurationException::class, PulsepondStorageException::class)
-    public fun reset() {
+    @Throws(
+        CancellationException::class,
+        PulsepondConfigurationException::class,
+        PulsepondStorageException::class,
+        PulsepondValidationException::class,
+    )
+    public suspend fun reset() {
         val now = nowMilliseconds()
-        synchronized(stateLock) {
+        val newInstallationId = synchronized(stateLock) {
             if (closed) return
-            val newInstallationId = createUuidV7(now, randomBytes)
-            persistence.reset(newInstallationId)
+            if (resetting || closing) {
+                throw PulsepondValidationException(
+                    "Pulsepond cannot reset while reset or shutdown is in progress",
+                )
+            }
+            val installationId = createUuidV7(now, randomBytes)
+            resetting = true
             generationInvalidation.complete(Unit)
-            generation += 1
-            generationInvalidation = CompletableDeferred()
-            queue.clear()
-            queueBytes = 0
-            effectiveBatchSize = configuration.batchSize
-            deliveryDeferred = false
-            identity.reset(now, newInstallationId)
+            installationId
+        }
+        try {
+            withContext(NonCancellable) {
+                flushLock.withLock {
+                    persistenceWriter.reset(newInstallationId)
+                    synchronized(stateLock) {
+                        generation += 1
+                        generationInvalidation = CompletableDeferred()
+                        queue.clear()
+                        queueBytes = 0
+                        effectiveBatchSize = configuration.batchSize
+                        deliveryDeferred = false
+                        identity.reset(now, newInstallationId)
+                        resetting = false
+                    }
+                }
+            }
+        } catch (error: Throwable) {
+            synchronized(stateLock) {
+                generationInvalidation = CompletableDeferred()
+                resetting = false
+            }
+            throw error
         }
     }
 
@@ -367,9 +397,17 @@ public class Pulsepond internal constructor(
                     )
                 }
                 try {
+                    persistenceWriter.close()
+                } catch (error: Throwable) {
+                    if (failure == null) failure = error
+                }
+                try {
                     transport.close()
+                } catch (error: Throwable) {
+                    if (failure == null) failure = error
                 } finally {
                     if (ownsScope) scope.cancel()
+                    ownershipLease?.release()
                     completion.complete(Unit)
                 }
             }
@@ -378,6 +416,10 @@ public class Pulsepond internal constructor(
     }
 
     internal fun pendingEventCount(): Int = synchronized(stateLock) { queue.size }
+
+    internal suspend fun awaitPersistence() {
+        persistenceWriter.drain()
+    }
 
     private fun scheduleImmediateFlush() {
         scope.launch {
@@ -429,49 +471,29 @@ public class Pulsepond internal constructor(
         }
     }
 
-    private fun validatePropertyBytes(properties: Map<String, EventPropertyValue>) {
-        val propertyEvent = EventRecord(
-            eventId = "00000000-0000-7000-8000-000000000000",
-            eventName = "property_size",
-            occurredAtMilliseconds = 0,
-            occurredAt = "1970-01-01T00:00:00Z",
-            platform = "other",
-            appVersion = null,
-            release = null,
-            environment = "test",
-            anonymousInstallationId = "installation",
-            sessionId = "session",
-            properties = properties,
+    private suspend fun dropStaleEvents(): QueueMutation {
+        val (dropped, replacement) = synchronized(stateLock) {
+            val cutoff = nowMilliseconds() - configuration.eventTtlMilliseconds
+            var dropped = 0
+            val iterator = queue.iterator()
+            while (iterator.hasNext()) {
+                val item = iterator.next()
+                if (item.event.occurredAtMilliseconds < cutoff) {
+                    queueBytes -= item.serializedBytes
+                    iterator.remove()
+                    dropped += 1
+                }
+            }
+            dropped to if (dropped > 0) {
+                persistenceWriter.tryReplace(queue.map(QueuedEvent::event))
+            } else {
+                null
+            }
+        }
+        val storageFailed = dropped > 0 && (
+            replacement == null || !persistenceWriter.awaitReplace(replacement)
         )
-        val bytes = propertyEvent.json()["properties"].toString().encodeToByteArray().size
-        if (bytes > maxPropertiesJsonBytes) {
-            throw PulsepondValidationException(
-                "properties must serialize within $maxPropertiesJsonBytes bytes",
-            )
-        }
-    }
-
-    private fun dropStaleEvents(): QueueMutation = synchronized(stateLock) {
-        val cutoff = nowMilliseconds() - configuration.eventTtlMilliseconds
-        var dropped = 0
-        val iterator = queue.iterator()
-        while (iterator.hasNext()) {
-            val item = iterator.next()
-            if (item.event.occurredAtMilliseconds < cutoff) {
-                queueBytes -= item.serializedBytes
-                iterator.remove()
-                dropped += 1
-            }
-        }
-        var storageFailed = false
-        if (dropped > 0) {
-            try {
-                persistence.replace(queue.map(QueuedEvent::event))
-            } catch (_: PulsepondStorageException) {
-                storageFailed = true
-            }
-        }
-        QueueMutation(dropped, storageFailed)
+        return QueueMutation(dropped, storageFailed)
     }
 
     private fun nextBatch(): Batch? = synchronized(stateLock) {
@@ -584,8 +606,8 @@ public class Pulsepond internal constructor(
         return value.toLong() * ceiling / 0xffff
     }
 
-    private fun removeBatch(batch: Batch): Boolean {
-        synchronized(stateLock) {
+    private suspend fun removeBatch(batch: Batch): Boolean {
+        val replacement = synchronized(stateLock) {
             if (batch.generation != generation || queue.size < batch.events.size) return false
             val expectedIds = batch.events.map { it.event.eventId }
             val actualIds = queue.take(expectedIds.size).map { it.event.eventId }
@@ -593,13 +615,9 @@ public class Pulsepond internal constructor(
             repeat(batch.events.size) {
                 queueBytes -= queue.removeAt(0).serializedBytes
             }
-            return try {
-                persistence.replace(queue.map(QueuedEvent::event))
-                false
-            } catch (_: PulsepondStorageException) {
-                true
-            }
+            persistenceWriter.tryReplace(queue.map(QueuedEvent::event))
         }
+        return replacement == null || !persistenceWriter.awaitReplace(replacement)
     }
 
     private fun notify(diagnostic: PulsepondDiagnostic) {
@@ -624,11 +642,26 @@ public class Pulsepond internal constructor(
 internal fun createPersistentPulsepond(
     configuration: PulsepondConfiguration,
     persistence: EventPersistence,
+    ownershipLease: ClientOwnershipLease? = null,
 ): Pulsepond = Pulsepond(
     configuration = configuration,
     transport = KtorEventTransport(configuration),
     nowMilliseconds = { Clock.System.now().toEpochMilliseconds() },
     randomBytes = ::fillSecureRandom,
     persistence = persistence,
+    ownershipLease = ownershipLease,
     coroutineScope = null,
 )
+
+internal fun createOwnedPersistentPulsepond(
+    configuration: PulsepondConfiguration,
+    persistence: EventPersistence,
+): Pulsepond {
+    val lease = ClientOwnershipRegistry.acquire(configuration.storageNamespace)
+    return try {
+        createPersistentPulsepond(configuration, persistence, lease)
+    } catch (error: Throwable) {
+        lease.release()
+        throw error
+    }
+}

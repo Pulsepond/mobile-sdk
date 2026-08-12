@@ -167,6 +167,7 @@ class PulsepondTest {
             coroutineScope = this,
         )
         first.track("offline_event")
+        first.awaitPersistence()
 
         val delivery = FakeTransport(FakeOutcome.Response(202))
         val restored = client(
@@ -203,10 +204,28 @@ class PulsepondTest {
 
         client.track("app_open")
         client.flush()
+        client.awaitPersistence()
 
         assertEquals("app_open", eventName(transport.bodies.single()))
         assertEquals(PulsepondDiagnosticCode.StorageFailed, diagnostics.single().code)
         assertEquals(0, diagnostics.single().droppedEvents)
+        client.shutdown()
+    }
+
+    @Test
+    fun trackQueuesPersistenceWithoutCallingStorageInline() = runTest {
+        val persistence = FailingPersistence()
+        val client = client(
+            transport = FakeTransport(),
+            persistence = persistence,
+            coroutineScope = this,
+        )
+
+        client.track("app_open")
+
+        assertEquals(0, persistence.appendCalls)
+        client.awaitPersistence()
+        assertEquals(1, persistence.appendCalls)
         client.shutdown()
     }
 
@@ -257,6 +276,7 @@ class PulsepondTest {
         client.flush()
 
         assertEquals(1, client.pendingEventCount())
+        client.awaitPersistence()
         val exhausted = diagnostics.last()
         assertEquals(PulsepondDiagnosticCode.RetryExhausted, exhausted.code)
         assertEquals(0, exhausted.droppedEvents)
@@ -286,6 +306,7 @@ class PulsepondTest {
         client.reset()
         client.track("after_reset")
         flush.join()
+        client.flush()
 
         transport.firstCancelled.await()
         assertEquals(listOf("before_reset", "after_reset"), transport.bodies.map(::eventName))
@@ -380,13 +401,16 @@ private class FailingPersistence(
 
     private var installationId: String? = null
     private val events: MutableList<EventRecord> = mutableListOf()
+    var appendCalls: Int = 0
+        private set
 
     override fun load(newInstallationId: () -> String): PersistedState {
         val activeId = installationId ?: newInstallationId().also { installationId = it }
         return PersistedState(activeId, events.toList())
     }
 
-    override fun append(event: EventRecord) {
+    override fun append(event: EventRecord, currentEvents: List<EventRecord>) {
+        appendCalls += 1
         if (failAppend) throw PulsepondStorageException("test append failure")
         events += event
     }
@@ -418,6 +442,7 @@ private fun client(
         configuration = PulsepondConfiguration(
             endpoint = "https://events.example.com/v1/batch",
             writeKey = testWriteKey,
+            sourceId = testSourceId,
             environment = "production",
             batchSize = batchSize,
             flushIntervalMilliseconds = flushIntervalMilliseconds,

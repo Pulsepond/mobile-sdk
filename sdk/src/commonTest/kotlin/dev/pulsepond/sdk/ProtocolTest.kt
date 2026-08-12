@@ -19,6 +19,9 @@ class ProtocolTest {
         assertTrue(isUuidV7(uuid))
         assertFalse(isUuidV7("-1020304-0506-7000-8000-000000000000"))
         assertFalse(isUuidV7("01020304-0506-7000-7000-000000000000"))
+        assertFailsWith<PulsepondConfigurationException> {
+            createUuidV7(maxProtocolTimestampMilliseconds + 1) { bytes -> bytes.fill(0) }
+        }
     }
 
     @Test
@@ -68,13 +71,29 @@ class ProtocolTest {
         val valid = PulsepondConfiguration(
             endpoint = "https://events.example.com/v1/batch",
             writeKey = testWriteKey,
+            sourceId = testSourceId,
             environment = "production",
         )
         assertEquals("events.example.com", valid.parsedEndpoint.host)
         assertEquals(
-            "0123456789abcdef0123456789abcdef/production",
+            "$testSourceId/production",
             valid.storageNamespace,
         )
+        val rotatedCredential = PulsepondConfiguration(
+            endpoint = "https://events.example.com/v1/batch",
+            writeKey = replacementWriteKey,
+            sourceId = testSourceId,
+            environment = "production",
+        )
+        assertEquals(valid.storageNamespace, rotatedCredential.storageNamespace)
+        assertFailsWith<PulsepondConfigurationException> {
+            PulsepondConfiguration(
+                "https://events.example.com/v1/batch",
+                testWriteKey,
+                "not-a-source-id",
+                "production",
+            )
+        }
 
         for (endpoint in listOf(
             "http://events.example.com/v1/batch",
@@ -83,7 +102,7 @@ class ProtocolTest {
             "https://events.example.com/v2/batch",
         )) {
             assertFailsWith<PulsepondConfigurationException>(endpoint) {
-                PulsepondConfiguration(endpoint, testWriteKey, "production")
+                PulsepondConfiguration(endpoint, testWriteKey, testSourceId, "production")
             }
         }
         assertTrue(
@@ -91,6 +110,7 @@ class ProtocolTest {
                 PulsepondConfiguration(
                     "http://localhost:8787/v1/batch",
                     testWriteKey,
+                    testSourceId,
                     "test",
                 )
             }.isSuccess,
@@ -101,3 +121,9 @@ class ProtocolTest {
 internal const val testWriteKey: String =
     "ppw_v1_0123456789abcdef0123456789abcdef_" +
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+internal const val testSourceId: String = "fedcba9876543210fedcba9876543210"
+
+internal const val replacementWriteKey: String =
+    "ppw_v1_fedcba9876543210fedcba9876543210_" +
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"

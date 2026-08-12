@@ -1,7 +1,7 @@
 package dev.pulsepond.sdk
 
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -16,6 +16,7 @@ import kotlin.time.Instant
 internal const val eventSchemaVersion: Int = 1
 internal const val maxBatchBytes: Int = 60_000
 internal const val maxQueueBytes: Int = 1_000_000
+internal const val maxProtocolTimestampMilliseconds: Long = 253_402_300_799_999
 private val persistedPlatforms: Set<String> = setOf("android", "ios", "web", "server", "other")
 
 internal data class EventRecord(
@@ -68,58 +69,73 @@ internal fun parsePersistedEvent(value: String): EventRecord? = runCatching {
     if (json["schema_version"]?.jsonPrimitive?.intOrNull != eventSchemaVersion) return null
     val occurredAt = json.requiredString("occurred_at")
     val occurredAtMilliseconds = Instant.parse(occurredAt).toEpochMilliseconds()
-    if (occurredAt(occurredAtMilliseconds) != occurredAt) error("occurred_at must be canonical")
     val properties = json["properties"]?.jsonObject?.entries?.associateTo(linkedMapOf()) {
         (key, element) ->
-        validateSlug("property name", key, 64)
         val primitive = element as? JsonPrimitive ?: error("property must be scalar")
         key to when {
             primitive === JsonNull -> EventPropertyValue.Null
-            primitive.isString -> EventPropertyValue.Text(primitive.content).also {
-                validatePrintableText("string property", primitive.content, 256)
-            }
+            primitive.isString -> EventPropertyValue.Text(primitive.content)
             primitive.booleanOrNull != null -> EventPropertyValue.Flag(primitive.booleanOrNull!!)
-            primitive.longOrNull != null -> EventPropertyValue.Integer(primitive.longOrNull!!).also {
-                if (primitive.longOrNull!! !in -maxSafeInteger..maxSafeInteger) {
-                    error("numeric property must be a safe integer")
-                }
-            }
+            primitive.longOrNull != null -> EventPropertyValue.Integer(primitive.longOrNull!!)
             else -> error("property must use a supported scalar")
         }
     } ?: error("properties are required")
-    if (properties.size > maxProperties) error("too many properties")
-    val eventId = json.requiredString("event_id")
-    val eventName = json.requiredString("event_name")
-    val platform = json.requiredString("platform")
-    val appVersion = json.optionalString("app_version")
-    val release = json.optionalString("release")
-    val environment = json.requiredString("environment")
-    val anonymousInstallationId = json.requiredString("anonymous_installation_id")
-    val sessionId = json.requiredString("session_id")
-    if (!isUuidV7(eventId) || !isUuidV7(anonymousInstallationId) || !isUuidV7(sessionId)) {
-        error("identifiers must be UUIDv7")
-    }
-    validateSlug("eventName", eventName, 64)
-    if (platform !in persistedPlatforms) {
-        error("platform is invalid")
-    }
-    validateOptionalText("appVersion", appVersion, 64)
-    validateOptionalText("release", release, 128)
-    validateSlug("environment", environment, 32)
     EventRecord(
-        eventId = eventId,
-        eventName = eventName,
+        eventId = json.requiredString("event_id"),
+        eventName = json.requiredString("event_name"),
         occurredAtMilliseconds = occurredAtMilliseconds,
         occurredAt = occurredAt,
-        platform = platform,
-        appVersion = appVersion,
-        release = release,
-        environment = environment,
-        anonymousInstallationId = anonymousInstallationId,
-        sessionId = sessionId,
+        platform = json.requiredString("platform"),
+        appVersion = json.optionalString("app_version"),
+        release = json.optionalString("release"),
+        environment = json.requiredString("environment"),
+        anonymousInstallationId = json.requiredString("anonymous_installation_id"),
+        sessionId = json.requiredString("session_id"),
         properties = properties,
-    )
+    ).also(::validateEventRecord)
 }.getOrNull()
+
+internal fun validateEventRecord(event: EventRecord) {
+    if (
+        !isUuidV7(event.eventId) ||
+        !isUuidV7(event.anonymousInstallationId) ||
+        !isUuidV7(event.sessionId)
+    ) {
+        throw PulsepondValidationException("event identifiers must be canonical UUIDv7 values")
+    }
+    validateSlug("eventName", event.eventName, 64)
+    if (event.occurredAtMilliseconds !in 0..maxProtocolTimestampMilliseconds) {
+        throw PulsepondValidationException("occurred_at must use a four-digit post-epoch UTC year")
+    }
+    if (occurredAt(event.occurredAtMilliseconds) != event.occurredAt) {
+        throw PulsepondValidationException("occurred_at must be canonical UTC")
+    }
+    if (event.platform !in persistedPlatforms) {
+        throw PulsepondValidationException("platform is invalid")
+    }
+    validateOptionalText("appVersion", event.appVersion, 64)
+    validateOptionalText("release", event.release, 128)
+    validateSlug("environment", event.environment, 32)
+    if (event.properties.size > maxProperties) {
+        throw PulsepondValidationException("properties must contain at most $maxProperties values")
+    }
+    event.properties.forEach { (key, property) ->
+        validateSlug("property name", key, 64)
+        when (property) {
+            is EventPropertyValue.Text -> validatePrintableText("string property", property.value, 256)
+            is EventPropertyValue.Integer -> if (property.value !in -maxSafeInteger..maxSafeInteger) {
+                throw PulsepondValidationException("numeric properties must be safe integers")
+            }
+            is EventPropertyValue.Flag, EventPropertyValue.Null -> Unit
+        }
+    }
+    val propertiesBytes = event.json()["properties"].toString().encodeToByteArray().size
+    if (propertiesBytes > maxPropertiesJsonBytes) {
+        throw PulsepondValidationException(
+            "properties must serialize within $maxPropertiesJsonBytes bytes",
+        )
+    }
+}
 
 private fun JsonObject.requiredString(name: String): String {
     val primitive = this[name] as? JsonPrimitive ?: error("$name is required")
@@ -146,7 +162,7 @@ internal fun isUuidV7(value: String): Boolean =
         }
 
 internal fun createUuidV7(timestampMilliseconds: Long, random: (ByteArray) -> Unit): String {
-    if (timestampMilliseconds !in 0..0xffffffffffffL) {
+    if (timestampMilliseconds !in 0..maxProtocolTimestampMilliseconds) {
         throw PulsepondConfigurationException("Pulsepond received an invalid system clock value")
     }
     val bytes = ByteArray(16)
@@ -174,5 +190,9 @@ internal fun createUuidV7(timestampMilliseconds: Long, random: (ByteArray) -> Un
     }
 }
 
-internal fun occurredAt(timestampMilliseconds: Long): String =
-    Instant.fromEpochMilliseconds(timestampMilliseconds).toString()
+internal fun occurredAt(timestampMilliseconds: Long): String {
+    if (timestampMilliseconds !in 0..maxProtocolTimestampMilliseconds) {
+        throw PulsepondConfigurationException("Pulsepond received an invalid system clock value")
+    }
+    return Instant.fromEpochMilliseconds(timestampMilliseconds).toString()
+}
