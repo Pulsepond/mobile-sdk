@@ -39,6 +39,16 @@ private data class QueueMutation(
     val storageFailed: Boolean,
 )
 
+private data class QueueSnapshot(
+    val events: List<EventRecord>,
+    val revision: Long,
+)
+
+private data class PendingQueueSnapshot(
+    val revision: Long,
+    val completion: CompletableDeferred<Boolean>?,
+)
+
 private data class Batch(
     val events: List<QueuedEvent>,
     val body: String,
@@ -112,6 +122,14 @@ public class Pulsepond internal constructor(
         persistedState.installationId,
     )
     private var queueBytes: Int = queue.sumOf(QueuedEvent::serializedBytes)
+    private var queueRevision: Long = 0
+    private var durableQueueRevision: Long = if (
+        persistence.isDurable && persistedState.events.size == queue.size
+    ) {
+        queueRevision
+    } else {
+        -1
+    }
     private var generation: Long = 0
     private var generationInvalidation: CompletableDeferred<Unit> = CompletableDeferred()
     private var effectiveBatchSize: Int = configuration.batchSize
@@ -136,6 +154,7 @@ public class Pulsepond internal constructor(
         if (discardedRecords > 0) {
             try {
                 persistence.replace(queue.map(QueuedEvent::event))
+                durableQueueRevision = queueRevision
             } catch (_: PulsepondStorageException) {
                 notifyStorageFailure()
             }
@@ -197,6 +216,7 @@ public class Pulsepond internal constructor(
                     storageFailed = !persistenceWriter.tryAppend(event)
                     queue += QueuedEvent(event, serializedBytes)
                     queueBytes += serializedBytes
+                    queueRevision += 1
                     deliveryDeferred = false
                     if (queue.size >= effectiveBatchSize) {
                         if (!immediateFlushScheduled) {
@@ -337,6 +357,8 @@ public class Pulsepond internal constructor(
                         generationInvalidation = CompletableDeferred()
                         queue.clear()
                         queueBytes = 0
+                        queueRevision += 1
+                        durableQueueRevision = queueRevision
                         effectiveBatchSize = configuration.batchSize
                         deliveryDeferred = false
                         identity.reset(now, newInstallationId)
@@ -393,13 +415,13 @@ public class Pulsepond internal constructor(
                 generation += 1
             }
             flushLock.withLock {
-                val pendingEvents = synchronized(stateLock) {
-                    queue.map(QueuedEvent::event)
+                val pendingSnapshot = synchronized(stateLock) {
+                    currentQueueSnapshotLocked()
                 }
                 val pendingEventsPersisted = when {
-                    pendingEvents.isEmpty() -> true
-                    !persistence.isDurable -> false
-                    else -> persistenceWriter.replace(pendingEvents)
+                    !persistence.isDurable -> pendingSnapshot.events.isEmpty()
+                    isQueueRevisionDurable(pendingSnapshot.revision) -> true
+                    else -> persistQueueSnapshot(pendingSnapshot)
                 }
                 val droppedEvents = synchronized(stateLock) {
                     val count = queue.size
@@ -420,6 +442,18 @@ public class Pulsepond internal constructor(
                     if (persistence.isDurable && cleanupFailure == null) {
                         cleanupFailure = PulsepondStorageException(
                             "Pulsepond could not preserve pending events during shutdown",
+                        )
+                    }
+                }
+                if (
+                    droppedEvents == 0 &&
+                    persistence.isDurable &&
+                    !pendingEventsPersisted
+                ) {
+                    notifyStorageFailure()
+                    if (cleanupFailure == null) {
+                        cleanupFailure = PulsepondStorageException(
+                            "Pulsepond could not finalize durable state during shutdown",
                         )
                     }
                 }
@@ -564,13 +598,14 @@ public class Pulsepond internal constructor(
                 }
             }
             dropped to if (dropped > 0) {
-                persistenceWriter.tryReplace(queue.map(QueuedEvent::event))
+                queueRevision += 1
+                tryPersistCurrentQueueLocked()
             } else {
                 null
             }
         }
         val storageFailed = dropped > 0 && (
-            replacement == null || !persistenceWriter.awaitReplace(replacement)
+            replacement == null || !awaitQueueSnapshot(replacement)
         )
         return QueueMutation(dropped, storageFailed)
     }
@@ -694,16 +729,48 @@ public class Pulsepond internal constructor(
             repeat(batch.events.size) {
                 queueBytes -= queue.removeAt(0).serializedBytes
             }
-            persistenceWriter.tryReplace(queue.map(QueuedEvent::event))
+            queueRevision += 1
+            tryPersistCurrentQueueLocked()
         }
-        return replacement == null || !persistenceWriter.awaitReplace(replacement)
+        return !awaitQueueSnapshot(replacement)
     }
 
     private suspend fun persistCurrentQueue(): Boolean {
-        val replacement = synchronized(stateLock) {
-            persistenceWriter.tryReplace(queue.map(QueuedEvent::event))
+        val snapshot = synchronized(stateLock) { currentQueueSnapshotLocked() }
+        return persistQueueSnapshot(snapshot)
+    }
+
+    private fun currentQueueSnapshotLocked(): QueueSnapshot = QueueSnapshot(
+        events = queue.map(QueuedEvent::event),
+        revision = queueRevision,
+    )
+
+    private fun tryPersistCurrentQueueLocked(): PendingQueueSnapshot = PendingQueueSnapshot(
+        revision = queueRevision,
+        completion = persistenceWriter.tryReplace(queue.map(QueuedEvent::event)),
+    )
+
+    private suspend fun awaitQueueSnapshot(snapshot: PendingQueueSnapshot): Boolean {
+        val completion = snapshot.completion ?: return false
+        val persisted = persistenceWriter.awaitReplace(completion)
+        if (persisted) markQueueRevisionDurable(snapshot.revision)
+        return persisted
+    }
+
+    private suspend fun persistQueueSnapshot(snapshot: QueueSnapshot): Boolean {
+        val persisted = persistenceWriter.replace(snapshot.events)
+        if (persisted) markQueueRevisionDurable(snapshot.revision)
+        return persisted
+    }
+
+    private fun markQueueRevisionDurable(revision: Long) {
+        synchronized(stateLock) {
+            durableQueueRevision = maxOf(durableQueueRevision, revision)
         }
-        return replacement != null && persistenceWriter.awaitReplace(replacement)
+    }
+
+    private fun isQueueRevisionDurable(revision: Long): Boolean = synchronized(stateLock) {
+        durableQueueRevision == revision
     }
 
     private fun notify(diagnostic: PulsepondDiagnostic) {
