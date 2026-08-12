@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v6
       - name: Set up JDK 21
@@ -25,27 +27,37 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
       - name: Validate release version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "Release tag must be v<semver> or <semver>." >&2
             exit 1
           fi
+          head_commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          if [[ "$head_commit" != "$tag_commit" ]]; then
+            echo "Checked-out commit does not match the release tag." >&2
+            exit 1
+          fi
           echo "ORG_GRADLE_PROJECT_pulsepondVersion=$version" >> "$GITHUB_ENV"
+          echo "PULSEPOND_RELEASE_COMMIT=$tag_commit" >> "$GITHUB_ENV"
       - name: Test and build release artifacts
         run: ./gradlew :sdk:testAndroidHostTest :sdk:iosSimulatorArm64Test :sdk:checkKotlinAbi :sdk:assemblePulsepondReleaseXCFramework
       - name: Package and compile Apple artifact consumer
-        run: ./scripts/check-apple-artifact.sh build/release-assets "$GITHUB_SHA"
+        run: ./scripts/check-apple-artifact.sh build/release-assets "$PULSEPOND_RELEASE_COMMIT"
       - name: Attach immutable Apple artifacts
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           archive="Pulsepond.xcframework.zip"
           checksum="Pulsepond.xcframework.zip.sha256"
           provenance="Pulsepond.xcframework.zip.provenance.json"
           asset_dir="build/release-assets"
-          assets="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
+          assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
           archive_exists=false
           checksum_exists=false
           provenance_exists=false
@@ -54,12 +66,12 @@ jobs:
           grep -Fxq "$provenance" <<< "$assets" && provenance_exists=true
           if [[ "$archive_exists" == true && "$checksum_exists" == true && "$provenance_exists" == true ]]; then
             mkdir existing-assets
-            gh release download "$GITHUB_REF_NAME" \
+            gh release download "$RELEASE_TAG" \
               --pattern "$archive" \
               --pattern "$checksum" \
               --pattern "$provenance" \
               --dir existing-assets
-            expected_sha="$(jq -er --arg commit "$GITHUB_SHA" \
+            expected_sha="$(jq -er --arg commit "$PULSEPOND_RELEASE_COMMIT" \
               'select(.artifact == "Pulsepond.xcframework.zip" and .commit == $commit) | .sha256' \
               "existing-assets/$provenance")"
             checksum_sha="$(awk 'NR == 1 {print $1}' "existing-assets/$checksum")"
@@ -70,7 +82,7 @@ jobs:
             fi
             echo "Existing release assets match this commit; continuing the retry."
           elif [[ "$archive_exists" == false && "$checksum_exists" == false && "$provenance_exists" == false ]]; then
-            gh release upload "$GITHUB_REF_NAME" \
+            gh release upload "$RELEASE_TAG" \
               "$asset_dir/$archive" \
               "$asset_dir/$checksum" \
               "$asset_dir/$provenance"
