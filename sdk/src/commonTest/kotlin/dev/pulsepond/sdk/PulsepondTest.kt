@@ -377,6 +377,27 @@ class PulsepondTest {
         assertFalse(loss.retryable)
         assertFailsWith<PulsepondValidationException> { client.track("too_late") }
     }
+
+    @Test
+    fun cancelledShutdownStillReportsDurableLossToConcurrentCallers() = runTest {
+        val transport = BlockingTransport()
+        val client = client(
+            transport = transport,
+            persistence = FailingPersistence(failReplaceAfterSuccesses = 1),
+            coroutineScope = this,
+        )
+        client.track("pending")
+        val first = launch {
+            runCatching { client.shutdown() }
+        }
+        transport.started.await()
+        val second = async { runCatching { client.shutdown() } }
+
+        first.cancelAndJoin()
+
+        assertTrue(second.await().exceptionOrNull() is PulsepondStorageException)
+        assertTrue(transport.closed)
+    }
 }
 
 private sealed interface FakeOutcome {
@@ -442,6 +463,7 @@ private class BlockingTransport : RecordingTransport() {
 private class FailingPersistence(
     private val failAppend: Boolean = false,
     private val failReplace: Boolean = false,
+    private val failReplaceAfterSuccesses: Int? = null,
     private val failReset: Boolean = false,
     private val incompleteReset: Boolean = false,
 ) : EventPersistence {
@@ -451,6 +473,7 @@ private class FailingPersistence(
     private val events: MutableList<EventRecord> = mutableListOf()
     var appendCalls: Int = 0
         private set
+    private var replaceCalls: Int = 0
 
     override fun load(newInstallationId: () -> String): PersistedState {
         val activeId = installationId ?: newInstallationId().also { installationId = it }
@@ -464,7 +487,11 @@ private class FailingPersistence(
     }
 
     override fun replace(events: List<EventRecord>) {
-        if (failReplace) throw PulsepondStorageException("test replace failure")
+        val shouldFail = failReplace || failReplaceAfterSuccesses?.let {
+            replaceCalls >= it
+        } == true
+        replaceCalls += 1
+        if (shouldFail) throw PulsepondStorageException("test replace failure")
         this.events.clear()
         this.events += events
     }

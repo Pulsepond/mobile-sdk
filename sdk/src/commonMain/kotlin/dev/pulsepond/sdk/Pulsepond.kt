@@ -360,7 +360,7 @@ public class Pulsepond internal constructor(
     }
 
     /** Makes one final bounded delivery attempt, closes the client, and joins concurrent callers. */
-    @Throws(CancellationException::class)
+    @Throws(CancellationException::class, PulsepondStorageException::class)
     public suspend fun shutdown() {
         var initiatesShutdown = false
         val completion = synchronized(stateLock) {
@@ -375,11 +375,16 @@ public class Pulsepond internal constructor(
             return
         }
 
-        var failure: Throwable? = null
+        var cancellation: CancellationException? = null
+        var cleanupFailure: PulsepondStorageException? = null
         try {
             flush()
+        } catch (error: CancellationException) {
+            cancellation = error
         } catch (error: Throwable) {
-            failure = error
+            cleanupFailure = PulsepondStorageException(
+                "Pulsepond could not complete final delivery during shutdown",
+            )
         }
 
         withContext(NonCancellable) {
@@ -412,29 +417,38 @@ public class Pulsepond internal constructor(
                             retryable = false,
                         ),
                     )
-                    if (persistence.isDurable && failure == null) {
-                        failure = PulsepondStorageException(
+                    if (persistence.isDurable && cleanupFailure == null) {
+                        cleanupFailure = PulsepondStorageException(
                             "Pulsepond could not preserve pending events during shutdown",
                         )
                     }
                 }
                 try {
                     persistenceWriter.close()
-                } catch (error: Throwable) {
-                    if (failure == null) failure = error
+                } catch (_: Throwable) {
+                    if (cleanupFailure == null) {
+                        cleanupFailure = PulsepondStorageException(
+                            "Pulsepond could not close durable state",
+                        )
+                    }
                 }
                 try {
                     transport.close()
-                } catch (error: Throwable) {
-                    if (failure == null) failure = error
+                } catch (_: Throwable) {
+                    if (cleanupFailure == null) {
+                        cleanupFailure = PulsepondStorageException(
+                            "Pulsepond could not close its transport",
+                        )
+                    }
                 } finally {
                     if (ownsScope) scope.cancel()
                     ownershipLease?.release()
-                    completion.complete(failure?.takeUnless { it is CancellationException })
+                    completion.complete(cleanupFailure)
                 }
             }
         }
-        failure?.let { throw it }
+        cancellation?.let { throw it }
+        cleanupFailure?.let { throw it }
     }
 
     internal fun pendingEventCount(): Int = synchronized(stateLock) { queue.size }
