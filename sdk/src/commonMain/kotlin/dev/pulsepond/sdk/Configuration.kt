@@ -4,12 +4,18 @@ import io.ktor.http.URLProtocol
 import io.ktor.http.Url
 
 private val writeKeyPattern = Regex("^ppw_v1_[0-9a-f]{32}_[0-9a-f]{64}$")
+private val deploymentIdPattern = Regex(
+    "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+)
 
 /** Immutable configuration for one source-scoped Pulsepond client. */
 public class PulsepondConfiguration @Throws(PulsepondConfigurationException::class)
 public constructor(
     public val endpoint: String,
     public val writeKey: String,
+    public val deploymentId: String,
+    public val projectId: String,
+    public val sourceId: String,
     public val environment: String,
     public val appVersion: String? = null,
     public val release: String? = null,
@@ -28,7 +34,14 @@ public constructor(
                 "writeKey must be a canonical Pulsepond publishable key",
             )
         }
+        if (!deploymentIdPattern.matches(deploymentId)) {
+            throw PulsepondConfigurationException(
+                "deploymentId must be a canonical lowercase UUID",
+            )
+        }
         try {
+            validateSlug("projectId", projectId, 128)
+            validateSlug("sourceId", sourceId, 128)
             validateSlug("environment", environment, 32)
             validateOptionalText("appVersion", appVersion, 64)
             validateOptionalText("release", release, 128)
@@ -55,6 +68,9 @@ public constructor(
         }
     }
 }
+
+internal val PulsepondConfiguration.storageNamespace: String
+    get() = "$deploymentId/$projectId/$sourceId/$environment"
 
 private fun validateEndpoint(value: String): Url {
     val url = try {

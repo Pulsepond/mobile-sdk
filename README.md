@@ -27,27 +27,36 @@ dependencies {
 ```
 
 ```kotlin
+import android.content.Context
 import dev.pulsepond.sdk.Pulsepond
+import dev.pulsepond.sdk.PulsepondAndroid
 import dev.pulsepond.sdk.PulsepondConfiguration
 import dev.pulsepond.sdk.PulsepondProperties
 
-val analytics = Pulsepond(
-    PulsepondConfiguration(
-        endpoint = "https://pulsepond.example.com/v1/batch",
-        writeKey = "ppw_v1_...",
-        environment = "production",
-        appVersion = BuildConfig.VERSION_NAME,
-        release = "android@${BuildConfig.VERSION_NAME}",
-    ),
-)
+suspend fun createAnalytics(context: Context): Pulsepond {
+    val analytics = PulsepondAndroid.create(
+        context,
+        PulsepondConfiguration(
+            endpoint = "https://pulsepond.example.com/v1/batch",
+            writeKey = "ppw_v1_...",
+            deploymentId = "01234567-89ab-4def-8abc-0123456789ab",
+            projectId = "project_foundation",
+            sourceId = "source_android",
+            environment = "production",
+            appVersion = BuildConfig.VERSION_NAME,
+            release = "android@${BuildConfig.VERSION_NAME}",
+        ),
+    )
 
-analytics.track(
-    "view_work",
-    PulsepondProperties().setString("work_id", "work_123"),
-)
+    analytics.track(
+        "view_work",
+        PulsepondProperties().setString("work_id", "work_123"),
+    )
+    return analytics
+}
 ```
 
-Call `analytics.shutdown()` from a coroutine when the application has a real finalization opportunity. Mobile operating systems do not guarantee a termination callback, so normal delivery is handled by bounded automatic flushes.
+Creation performs recovery on a background dispatcher and is therefore suspending. Keep one client per source and environment. Call `analytics.shutdown()` from a coroutine when the application has a real finalization opportunity. Mobile operating systems do not guarantee a termination callback, so normal delivery is handled by bounded automatic flushes.
 
 ## iOS
 
@@ -56,20 +65,22 @@ Download `Pulsepond.xcframework.zip` from a release, verify the published SHA-25
 ```swift
 import Pulsepond
 
-let analytics = try Pulsepond(
-    configuration: try PulsepondConfiguration(
-        endpoint: "https://pulsepond.example.com/v1/batch",
-        writeKey: "ppw_v1_...",
-        environment: "production",
-        appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-        release: "ios@1.0.0",
-        batchSize: 20,
-        flushIntervalMilliseconds: 5_000,
-        maxQueueSize: 1_000,
-        eventTtlMilliseconds: 82_800_000,
-        diagnosticListener: nil
-    )
+let configuration = try PulsepondConfiguration(
+    endpoint: "https://pulsepond.example.com/v1/batch",
+    writeKey: "ppw_v1_...",
+    deploymentId: "01234567-89ab-4def-8abc-0123456789ab",
+    projectId: "project_foundation",
+    sourceId: "source_ios",
+    environment: "production",
+    appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+    release: "ios@1.0.0",
+    batchSize: 20,
+    flushIntervalMilliseconds: 5_000,
+    maxQueueSize: 1_000,
+    eventTtlMilliseconds: 82_800_000,
+    diagnosticListener: nil
 )
+let analytics = try await PulsepondApple.shared.create(configuration: configuration)
 
 try analytics.track(
     eventName: "view_work",
@@ -77,25 +88,26 @@ try analytics.track(
 )
 ```
 
-Validation failures cross the generated Objective-C boundary as Swift errors, so configuration, property setters, tracking, flush, and shutdown use `try`. A real Swift consumer is type-checked against the release XCFramework on macOS CI. A hand-written convenience façade and Swift Package Manager distribution are planned before the first stable release.
+Validation failures cross the generated Objective-C boundary as Swift errors. Configuration, property setters, and tracking use `try`; creation, flush, reset, and shutdown use `try await`. A real Swift consumer is type-checked against the release XCFramework on macOS CI. A hand-written convenience façade and Swift Package Manager distribution are planned before the first stable release.
 
 ## Contract and delivery
 
 - Events are posted only to the configured HTTPS URL with the exact `/v1/batch` path. Plain HTTP is accepted only for loopback development.
 - Every event receives a UUIDv7 `event_id`, UTC `occurred_at`, platform, environment, anonymous installation ID, and session ID.
 - Properties are flat and intentionally closed to strings, safe integers, booleans, and null. Names and values are bounded before enqueueing.
-- Queues, batches, retry counts, retry delays, and event age are bounded. A 413 response splits a batch without changing event IDs.
+- Queues, batches, retry counts, retry delays, event age, and on-disk journal size are bounded. A 413 response splits a batch without changing event IDs.
+- Android and Apple factories persist the installation identity and unsent queue in app-private storage, isolated by deployment, project, source, and environment. `track` returns without filesystem I/O; one bounded serial writer preserves operation order in the background. Accepted event IDs may be replayed after a storage write failure, so the server remains responsible for idempotent ingestion.
 - A batch body is frozen before its first attempt and remains byte-identical across retries.
 - HTTP 202 is the only success response. Network errors, 408, 429, and 5xx responses retry with bounded jitter. Other 4xx responses are terminal.
 - Diagnostics never contain event payloads, property values, endpoint query data, or credentials.
 
-The current pre-1.0 implementation keeps its queue and anonymous identity in memory. It cannot guarantee delivery after process termination or calculate installation retention across separate launches yet. Durable platform storage is the next compatibility boundary and will land before a stable release.
+Create clients with `PulsepondAndroid.create` or `PulsepondApple.shared.create`; both select the durable platform implementation.
 
 See [Architecture](docs/ARCHITECTURE.md) for the design constraints and [Contributing](CONTRIBUTING.md) for local verification.
 
 ## Credentials and privacy
 
-A Pulsepond write key is a publishable, source-scoped ingestion credential. Mobile binaries cannot keep a bundled value secret. Never embed a control-plane token, Cloudflare token, or read credential. Rotate the write key if a source is abused.
+A Pulsepond write key is a publishable, source-scoped ingestion credential. Mobile binaries cannot keep a bundled value secret. Never embed a control-plane token, Cloudflare token, or read credential. Rotate the write key if a source is abused. The non-secret deployment, project, and source IDs identify the durable storage namespace and must remain unchanged when its write key rotates.
 
 Pulsepond cannot know whether a custom property is personal data. Do not send email addresses, authorization values, cookies, full URLs or query strings, search text, feedback bodies, request bodies, or other content that your disclosure and retention policy do not cover.
 

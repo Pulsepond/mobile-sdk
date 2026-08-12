@@ -1,15 +1,23 @@
 package dev.pulsepond.sdk
 
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlin.time.Instant
 
 internal const val eventSchemaVersion: Int = 1
 internal const val maxBatchBytes: Int = 60_000
 internal const val maxQueueBytes: Int = 1_000_000
+internal const val maxProtocolTimestampMilliseconds: Long = 253_402_300_799_999
+private val persistedPlatforms: Set<String> = setOf("android", "ios", "web", "server", "other")
 
 internal data class EventRecord(
     val eventId: String,
@@ -56,8 +64,105 @@ internal fun eventBatchJson(events: List<EventRecord>): String =
         put("events", JsonArray(events.map(EventRecord::json)))
     }.toString()
 
+internal fun parsePersistedEvent(value: String): EventRecord? = runCatching {
+    val json = Json.parseToJsonElement(value).jsonObject
+    if (json["schema_version"]?.jsonPrimitive?.intOrNull != eventSchemaVersion) return null
+    val occurredAt = json.requiredString("occurred_at")
+    val occurredAtMilliseconds = Instant.parse(occurredAt).toEpochMilliseconds()
+    val properties = json["properties"]?.jsonObject?.entries?.associateTo(linkedMapOf()) {
+        (key, element) ->
+        val primitive = element as? JsonPrimitive ?: error("property must be scalar")
+        key to when {
+            primitive === JsonNull -> EventPropertyValue.Null
+            primitive.isString -> EventPropertyValue.Text(primitive.content)
+            primitive.booleanOrNull != null -> EventPropertyValue.Flag(primitive.booleanOrNull!!)
+            primitive.longOrNull != null -> EventPropertyValue.Integer(primitive.longOrNull!!)
+            else -> error("property must use a supported scalar")
+        }
+    } ?: error("properties are required")
+    EventRecord(
+        eventId = json.requiredString("event_id"),
+        eventName = json.requiredString("event_name"),
+        occurredAtMilliseconds = occurredAtMilliseconds,
+        occurredAt = occurredAt,
+        platform = json.requiredString("platform"),
+        appVersion = json.optionalString("app_version"),
+        release = json.optionalString("release"),
+        environment = json.requiredString("environment"),
+        anonymousInstallationId = json.requiredString("anonymous_installation_id"),
+        sessionId = json.requiredString("session_id"),
+        properties = properties,
+    ).also(::validateEventRecord)
+}.getOrNull()
+
+internal fun validateEventRecord(event: EventRecord) {
+    if (
+        !isUuidV7(event.eventId) ||
+        !isUuidV7(event.anonymousInstallationId) ||
+        !isUuidV7(event.sessionId)
+    ) {
+        throw PulsepondValidationException("event identifiers must be canonical UUIDv7 values")
+    }
+    validateSlug("eventName", event.eventName, 64)
+    if (event.occurredAtMilliseconds !in 0..maxProtocolTimestampMilliseconds) {
+        throw PulsepondValidationException("occurred_at must use a four-digit post-epoch UTC year")
+    }
+    if (occurredAt(event.occurredAtMilliseconds) != event.occurredAt) {
+        throw PulsepondValidationException("occurred_at must be canonical UTC")
+    }
+    if (event.platform !in persistedPlatforms) {
+        throw PulsepondValidationException("platform is invalid")
+    }
+    validateOptionalText("appVersion", event.appVersion, 64)
+    validateOptionalText("release", event.release, 128)
+    validateSlug("environment", event.environment, 32)
+    if (event.properties.size > maxProperties) {
+        throw PulsepondValidationException("properties must contain at most $maxProperties values")
+    }
+    event.properties.forEach { (key, property) ->
+        validateSlug("property name", key, 64)
+        when (property) {
+            is EventPropertyValue.Text -> validatePrintableText("string property", property.value, 256)
+            is EventPropertyValue.Integer -> if (property.value !in -maxSafeInteger..maxSafeInteger) {
+                throw PulsepondValidationException("numeric properties must be safe integers")
+            }
+            is EventPropertyValue.Flag, EventPropertyValue.Null -> Unit
+        }
+    }
+    val propertiesBytes = event.json()["properties"].toString().encodeToByteArray().size
+    if (propertiesBytes > maxPropertiesJsonBytes) {
+        throw PulsepondValidationException(
+            "properties must serialize within $maxPropertiesJsonBytes bytes",
+        )
+    }
+}
+
+private fun JsonObject.requiredString(name: String): String {
+    val primitive = this[name] as? JsonPrimitive ?: error("$name is required")
+    if (!primitive.isString) error("$name must be a string")
+    return primitive.content
+}
+
+private fun JsonObject.optionalString(name: String): String? {
+    val element = this[name] ?: return null
+    if (element === JsonNull) return null
+    val primitive = element as? JsonPrimitive ?: error("$name must be a string")
+    if (!primitive.isString) error("$name must be a string")
+    return primitive.content
+}
+
+internal fun isUuidV7(value: String): Boolean =
+    value.length == 36 && value[14] == '7' && value[19].lowercaseChar() in "89ab" &&
+        value.withIndex().all { (index, character) ->
+            if (index == 8 || index == 13 || index == 18 || index == 23) {
+                character == '-'
+            } else {
+                character.lowercaseChar() in '0'..'9' || character.lowercaseChar() in 'a'..'f'
+            }
+        }
+
 internal fun createUuidV7(timestampMilliseconds: Long, random: (ByteArray) -> Unit): String {
-    if (timestampMilliseconds !in 0..0xffffffffffffL) {
+    if (timestampMilliseconds !in 0..maxProtocolTimestampMilliseconds) {
         throw PulsepondConfigurationException("Pulsepond received an invalid system clock value")
     }
     val bytes = ByteArray(16)
@@ -85,5 +190,9 @@ internal fun createUuidV7(timestampMilliseconds: Long, random: (ByteArray) -> Un
     }
 }
 
-internal fun occurredAt(timestampMilliseconds: Long): String =
-    Instant.fromEpochMilliseconds(timestampMilliseconds).toString()
+internal fun occurredAt(timestampMilliseconds: Long): String {
+    if (timestampMilliseconds !in 0..maxProtocolTimestampMilliseconds) {
+        throw PulsepondConfigurationException("Pulsepond received an invalid system clock value")
+    }
+    return Instant.fromEpochMilliseconds(timestampMilliseconds).toString()
+}

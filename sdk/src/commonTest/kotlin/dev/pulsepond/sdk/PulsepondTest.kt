@@ -1,6 +1,7 @@
 package dev.pulsepond.sdk
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
@@ -13,6 +14,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okio.Path.Companion.toPath
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -127,10 +129,17 @@ class PulsepondTest {
     fun boundedQueueFailsClosedAndEmitsOnlyRedactedDiagnostics() = runTest {
         val transport = FakeTransport(FakeOutcome.Response(202))
         val diagnostics = mutableListOf<PulsepondDiagnostic>()
-        val client = client(transport, diagnostics, batchSize = 1, maxQueueSize = 1)
+        val client = client(
+            transport,
+            diagnostics,
+            batchSize = 2,
+            maxQueueSize = 2,
+            coroutineScope = this,
+        )
 
         assertNotEquals(null, client.track("first"))
-        assertNull(client.track("second"))
+        assertNotEquals(null, client.track("second"))
+        assertNull(client.track("third"))
         assertEquals(PulsepondDiagnosticCode.QueueFull, diagnostics.single().code)
         assertEquals(1, diagnostics.single().droppedEvents)
         client.shutdown()
@@ -157,6 +166,249 @@ class PulsepondTest {
     }
 
     @Test
+    fun aPersistedEventSurvivesClientRecreationAndIsRemovedAfterAcceptance() = runTest {
+        val fileSystem = okio.fakefilesystem.FakeFileSystem()
+        val directory = "/pulsepond/integration".toPath()
+        val first = client(
+            transport = FakeTransport(),
+            persistence = FileEventPersistence(fileSystem, directory),
+            coroutineScope = this,
+        )
+        first.track("offline_event")
+        first.awaitPersistence()
+
+        val delivery = FakeTransport(FakeOutcome.Response(202))
+        val restored = client(
+            transport = delivery,
+            persistence = FileEventPersistence(fileSystem, directory),
+            coroutineScope = this,
+        )
+        assertEquals(1, restored.pendingEventCount())
+        restored.flush()
+
+        assertEquals("offline_event", eventName(delivery.bodies.single()))
+        val afterDelivery = client(
+            transport = FakeTransport(),
+            persistence = FileEventPersistence(fileSystem, directory),
+            coroutineScope = this,
+        )
+        assertEquals(0, afterDelivery.pendingEventCount())
+        restored.shutdown()
+        afterDelivery.shutdown()
+        first.reset()
+        first.shutdown()
+        fileSystem.checkNoOpenFiles()
+    }
+
+    @Test
+    fun appendFailureKeepsTheEventInMemoryAndEmitsARedactedDiagnostic() = runTest {
+        val diagnostics = mutableListOf<PulsepondDiagnostic>()
+        val transport = FakeTransport(FakeOutcome.Response(202))
+        val client = client(
+            transport = transport,
+            diagnostics = diagnostics,
+            persistence = FailingPersistence(failAppend = true),
+        )
+
+        client.track("app_open")
+        client.flush()
+        client.awaitPersistence()
+
+        assertEquals("app_open", eventName(transport.bodies.single()))
+        assertEquals(PulsepondDiagnosticCode.StorageFailed, diagnostics.single().code)
+        assertEquals(0, diagnostics.single().droppedEvents)
+        client.shutdown()
+    }
+
+    @Test
+    fun appendCompactionMarksTheExactQueueDurable() = runTest {
+        val fileSystem = okio.fakefilesystem.FakeFileSystem()
+        val directory = "/pulsepond/append-compaction".toPath()
+        val diagnostics = mutableListOf<PulsepondDiagnostic>()
+        val persistence = FailingReplacePersistence(
+            FileEventPersistence(fileSystem, directory),
+        )
+        val client = client(
+            transport = FakeTransport(
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+            ),
+            diagnostics = diagnostics,
+            persistence = persistence,
+            coroutineScope = this,
+        )
+        val installationId = Json.parseToJsonElement(
+            fileSystem.read(directory / "active.json") { readUtf8() },
+        ).jsonObject["installation_id"]!!.jsonPrimitive.content
+        fileSystem.write(directory / "$installationId.events") {
+            writeUtf8("x".repeat((maximumJournalBytes - 16).toInt()))
+        }
+
+        client.track("compacted")
+        client.awaitPersistence()
+        client.shutdown()
+
+        assertEquals(0, persistence.replaceCalls)
+        assertFalse(
+            diagnostics.any {
+                it.code == PulsepondDiagnosticCode.StorageFailed ||
+                    (
+                        it.code == PulsepondDiagnosticCode.DeliveryFailed &&
+                            it.droppedEvents > 0
+                    )
+            },
+        )
+        val restored = FileEventPersistence(fileSystem, directory).load { installationId }
+        assertEquals(listOf("compacted"), restored.events.map(EventRecord::eventName))
+        fileSystem.checkNoOpenFiles()
+    }
+
+    @Test
+    fun compactionRemainsExactWhenANewerAppendIsAlreadyQueued() = runTest {
+        val diagnostics = mutableListOf<PulsepondDiagnostic>()
+        val persistence = CallbackCompactingPersistence()
+        val client = client(
+            transport = FakeTransport(
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+            ),
+            diagnostics = diagnostics,
+            persistence = persistence,
+            coroutineScope = this,
+        )
+        persistence.duringCompaction = {
+            client.track("queued_during_compaction")
+        }
+
+        client.track("compacted")
+        client.awaitPersistence()
+        client.shutdown()
+
+        assertEquals(0, persistence.replaceCalls)
+        assertEquals(
+            listOf("compacted", "queued_during_compaction"),
+            persistence.events.map(EventRecord::eventName),
+        )
+        assertFalse(diagnostics.any { it.code == PulsepondDiagnosticCode.StorageFailed })
+        assertFalse(
+            diagnostics.any {
+                it.code == PulsepondDiagnosticCode.DeliveryFailed && it.droppedEvents > 0
+            },
+        )
+    }
+
+    @Test
+    fun trackQueuesPersistenceWithoutCallingStorageInline() = runTest {
+        val persistence = FailingPersistence()
+        val client = client(
+            transport = FakeTransport(),
+            persistence = persistence,
+            coroutineScope = this,
+        )
+
+        client.track("app_open")
+
+        assertEquals(0, persistence.appendCalls)
+        client.awaitPersistence()
+        assertEquals(1, persistence.appendCalls)
+        client.shutdown()
+    }
+
+    @Test
+    fun failedDurableResetLeavesTheCurrentQueueAndIdentityUntouched() = runTest {
+        val transport = FakeTransport(FakeOutcome.Response(202))
+        val client = client(
+            transport = transport,
+            persistence = FailingPersistence(failReset = true),
+        )
+        client.track("before_reset")
+
+        assertFailsWith<PulsepondStorageException> { client.reset() }
+        client.track("after_failed_reset")
+        client.flush()
+
+        val events = Json.parseToJsonElement(transport.bodies.single())
+            .jsonObject["events"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("before_reset", "after_failed_reset"), events.map {
+            it["event_name"]!!.jsonPrimitive.content
+        })
+        assertEquals(1, events.map {
+            it["anonymous_installation_id"]!!.jsonPrimitive.content
+        }.distinct().size)
+        client.shutdown()
+    }
+
+    @Test
+    fun committedResetRotatesIdentityEvenWhenCleanupMustResumeLater() = runTest {
+        val transport = FakeTransport(
+            FakeOutcome.Response(202),
+            FakeOutcome.Response(202),
+        )
+        val client = client(
+            transport = transport,
+            persistence = FailingPersistence(incompleteReset = true),
+        )
+        client.track("before_reset")
+        client.flush()
+
+        assertFailsWith<PulsepondStorageException> { client.reset() }
+        client.track("after_reset")
+        client.flush()
+
+        assertNotEquals(anonymousId(transport.bodies.first()), anonymousId(transport.bodies.last()))
+        client.shutdown()
+    }
+
+    @Test
+    fun retryExhaustionDefersRatherThanDropsTheDurableQueue() = runTest {
+        val fileSystem = okio.fakefilesystem.FakeFileSystem()
+        val directory = "/pulsepond/retry".toPath()
+        val diagnostics = mutableListOf<PulsepondDiagnostic>()
+        val client = client(
+            transport = FakeTransport(
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+                FakeOutcome.Failure,
+            ),
+            diagnostics = diagnostics,
+            persistence = FileEventPersistence(fileSystem, directory),
+            coroutineScope = this,
+        )
+        client.track("offline_event")
+
+        client.flush()
+
+        assertEquals(1, client.pendingEventCount())
+        val exhausted = diagnostics.last()
+        assertEquals(PulsepondDiagnosticCode.RetryExhausted, exhausted.code)
+        assertEquals(0, exhausted.droppedEvents)
+        assertTrue(exhausted.retryable)
+        val delivery = FakeTransport(FakeOutcome.Response(202))
+        val restored = client(
+            transport = delivery,
+            persistence = FileEventPersistence(fileSystem, directory),
+            coroutineScope = this,
+        )
+        restored.flush()
+        assertEquals("offline_event", eventName(delivery.bodies.single()))
+        restored.shutdown()
+        client.reset()
+        client.shutdown()
+        fileSystem.checkNoOpenFiles()
+    }
+
+    @Test
     fun resetCancelsAnInFlightBodyAndNeverRetriesIt() = runTest {
         val transport = ResetAwareTransport()
         val client = client(transport)
@@ -167,6 +419,7 @@ class PulsepondTest {
         client.reset()
         client.track("after_reset")
         flush.join()
+        client.flush()
 
         transport.firstCancelled.await()
         assertEquals(listOf("before_reset", "after_reset"), transport.bodies.map(::eventName))
@@ -190,6 +443,88 @@ class PulsepondTest {
 
         assertTrue(transport.closed)
         assertFailsWith<PulsepondValidationException> { client.track("too_late") }
+    }
+
+    @Test
+    fun shutdownReportsAndFailsWhenPendingEventsCannotBePersisted() = runTest {
+        val diagnostics = mutableListOf<PulsepondDiagnostic>()
+        val client = client(
+            transport = FakeTransport(),
+            diagnostics = diagnostics,
+            persistence = FailingPersistence(failAppend = true, failReplace = true),
+            coroutineScope = this,
+        )
+        client.track("pending")
+
+        assertFailsWith<PulsepondStorageException> { client.shutdown() }
+
+        val loss = diagnostics.last { it.code == PulsepondDiagnosticCode.DeliveryFailed }
+        assertEquals(1, loss.droppedEvents)
+        assertFalse(loss.retryable)
+        assertFailsWith<PulsepondValidationException> { client.track("too_late") }
+    }
+
+    @Test
+    fun cancelledShutdownSkipsRedundantSnapshotAndSharesCleanupFailure() = runTest {
+        val diagnostics = mutableListOf<PulsepondDiagnostic>()
+        val transport = FailingCloseBlockingTransport()
+        val persistence = FailingPersistence(failReplaceAfterSuccesses = 1)
+        val client = client(
+            transport = transport,
+            diagnostics = diagnostics,
+            persistence = persistence,
+            coroutineScope = this,
+        )
+        client.track("pending")
+        val initiatorFailure = CompletableDeferred<Throwable?>()
+        val first = launch {
+            try {
+                client.shutdown()
+                initiatorFailure.complete(null)
+            } catch (error: Throwable) {
+                initiatorFailure.complete(error)
+            }
+        }
+        transport.started.await()
+        val second = async { runCatching { client.shutdown() } }
+
+        first.cancelAndJoin()
+
+        assertTrue(initiatorFailure.await() is CancellationException)
+        assertTrue(second.await().exceptionOrNull() is PulsepondStorageException)
+        assertEquals(0, persistence.replaceCalls)
+        assertFalse(diagnostics.any { it.code == PulsepondDiagnosticCode.DeliveryFailed })
+        assertTrue(transport.closed)
+    }
+
+    @Test
+    fun snapshotRevisionDoesNotCoverEventsTrackedWhilePersistenceCompletes() = runTest {
+        val diagnostics = mutableListOf<PulsepondDiagnostic>()
+        val transport = BlockingTransport()
+        val persistence = FailingPersistence(
+            failAppend = true,
+            failReplaceAfterSuccesses = 1,
+        )
+        val client = client(
+            transport = transport,
+            diagnostics = diagnostics,
+            persistence = persistence,
+            coroutineScope = this,
+        )
+        persistence.afterFirstSuccessfulReplace = {
+            client.track("during_snapshot")
+        }
+        client.track("before_snapshot")
+        val flush = launch { client.flush() }
+        transport.started.await()
+
+        flush.cancelAndJoin()
+
+        assertFailsWith<PulsepondStorageException> { client.shutdown() }
+        assertEquals(3, persistence.replaceCalls)
+        val loss = diagnostics.last { it.code == PulsepondDiagnosticCode.DeliveryFailed }
+        assertEquals(1, loss.droppedEvents)
+        assertFalse(loss.retryable)
     }
 }
 
@@ -253,6 +588,140 @@ private class BlockingTransport : RecordingTransport() {
     }
 }
 
+private class FailingCloseBlockingTransport : RecordingTransport() {
+    val started: CompletableDeferred<Unit> = CompletableDeferred()
+
+    override suspend fun post(body: String): TransportResponse {
+        bodies += body
+        started.complete(Unit)
+        awaitCancellation()
+    }
+
+    override fun close() {
+        super.close()
+        throw IllegalStateException("test close failure")
+    }
+}
+
+private class FailingPersistence(
+    private val failAppend: Boolean = false,
+    private val failReplace: Boolean = false,
+    private val failReplaceAfterSuccesses: Int? = null,
+    private val failReset: Boolean = false,
+    private val incompleteReset: Boolean = false,
+) : EventPersistence {
+    override val isDurable: Boolean = true
+
+    private var installationId: String? = null
+    private val events: MutableList<EventRecord> = mutableListOf()
+    var appendCalls: Int = 0
+        private set
+    var replaceCalls: Int = 0
+        private set
+    var afterFirstSuccessfulReplace: (() -> Unit)? = null
+
+    override fun load(newInstallationId: () -> String): PersistedState {
+        val activeId = installationId ?: newInstallationId().also { installationId = it }
+        return PersistedState(activeId, events.toList())
+    }
+
+    override fun append(
+        event: EventRecord,
+        currentEvents: List<EventRecord>,
+    ): AppendPersistenceResult {
+        appendCalls += 1
+        if (failAppend) {
+            throw PulsepondStorageException("test append failure")
+        }
+        events += event
+        return AppendPersistenceResult.AppendedEvent
+    }
+
+    override fun replace(events: List<EventRecord>) {
+        val shouldFail = failReplace || failReplaceAfterSuccesses?.let {
+            replaceCalls >= it
+        } == true
+        replaceCalls += 1
+        if (shouldFail) throw PulsepondStorageException("test replace failure")
+        this.events.clear()
+        this.events += events
+        if (replaceCalls == 1) afterFirstSuccessfulReplace?.invoke()
+    }
+
+    override fun reset(newInstallationId: String): PersistenceResetResult {
+        if (failReset) throw PulsepondStorageException("test reset failure")
+        installationId = newInstallationId
+        events.clear()
+        return PersistenceResetResult(completed = !incompleteReset)
+    }
+}
+
+private class FailingReplacePersistence(
+    private val delegate: EventPersistence,
+) : EventPersistence {
+    override val isDurable: Boolean = true
+    var replaceCalls: Int = 0
+        private set
+
+    override fun load(newInstallationId: () -> String): PersistedState =
+        delegate.load(newInstallationId)
+
+    override fun append(
+        event: EventRecord,
+        currentEvents: List<EventRecord>,
+    ): AppendPersistenceResult = delegate.append(event, currentEvents)
+
+    override fun replace(events: List<EventRecord>) {
+        replaceCalls += 1
+        throw PulsepondStorageException("test replacement failure")
+    }
+
+    override fun reset(newInstallationId: String): PersistenceResetResult =
+        delegate.reset(newInstallationId)
+}
+
+private class CallbackCompactingPersistence : EventPersistence {
+    override val isDurable: Boolean = true
+    val events: MutableList<EventRecord> = mutableListOf()
+    var duringCompaction: (() -> Unit)? = null
+    var replaceCalls: Int = 0
+        private set
+    private var installationId: String? = null
+    private var appendCalls: Int = 0
+
+    override fun load(newInstallationId: () -> String): PersistedState {
+        val activeId = installationId ?: newInstallationId().also { installationId = it }
+        return PersistedState(activeId, events.toList())
+    }
+
+    override fun append(
+        event: EventRecord,
+        currentEvents: List<EventRecord>,
+    ): AppendPersistenceResult {
+        appendCalls += 1
+        return if (appendCalls == 1) {
+            events.clear()
+            events += currentEvents
+            duringCompaction?.invoke()
+            AppendPersistenceResult.ReplacedSnapshot
+        } else {
+            events += event
+            AppendPersistenceResult.AppendedEvent
+        }
+    }
+
+    override fun replace(events: List<EventRecord>) {
+        replaceCalls += 1
+        throw PulsepondStorageException("test replacement failure")
+    }
+
+    override fun reset(newInstallationId: String): PersistenceResetResult {
+        installationId = newInstallationId
+        events.clear()
+        return PersistenceResetResult(completed = true)
+    }
+}
+
 private fun client(
     transport: EventTransport,
     diagnostics: MutableList<PulsepondDiagnostic> = mutableListOf(),
@@ -260,6 +729,7 @@ private fun client(
     maxQueueSize: Int = 1_000,
     flushIntervalMilliseconds: Long = 0,
     coroutineScope: kotlinx.coroutines.CoroutineScope? = null,
+    persistence: EventPersistence = VolatileEventPersistence,
 ): Pulsepond {
     var now = 1_800_000_000_000L
     var randomByte = 0
@@ -267,6 +737,9 @@ private fun client(
         configuration = PulsepondConfiguration(
             endpoint = "https://events.example.com/v1/batch",
             writeKey = testWriteKey,
+            deploymentId = testDeploymentId,
+            projectId = testProjectId,
+            sourceId = testSourceId,
             environment = "production",
             batchSize = batchSize,
             flushIntervalMilliseconds = flushIntervalMilliseconds,
@@ -283,6 +756,7 @@ private fun client(
                 randomByte = (randomByte + 1) and 0xff
             }
         },
+        persistence = persistence,
         coroutineScope = coroutineScope,
     )
 }

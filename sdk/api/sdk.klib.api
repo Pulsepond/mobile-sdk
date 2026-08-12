@@ -12,6 +12,8 @@ final enum class dev.pulsepond.sdk/PulsepondDiagnosticCode : kotlin/Enum<dev.pul
     enum entry QueueFull // dev.pulsepond.sdk/PulsepondDiagnosticCode.QueueFull|null[0]
     enum entry RetryExhausted // dev.pulsepond.sdk/PulsepondDiagnosticCode.RetryExhausted|null[0]
     enum entry StaleEvent // dev.pulsepond.sdk/PulsepondDiagnosticCode.StaleEvent|null[0]
+    enum entry StorageFailed // dev.pulsepond.sdk/PulsepondDiagnosticCode.StorageFailed|null[0]
+    enum entry StorageRecovered // dev.pulsepond.sdk/PulsepondDiagnosticCode.StorageRecovered|null[0]
 
     final val entries // dev.pulsepond.sdk/PulsepondDiagnosticCode.entries|#static{}entries[0]
         final fun <get-entries>(): kotlin.enums/EnumEntries<dev.pulsepond.sdk/PulsepondDiagnosticCode> // dev.pulsepond.sdk/PulsepondDiagnosticCode.entries.<get-entries>|<get-entries>#static(){}[0]
@@ -27,22 +29,22 @@ abstract fun interface dev.pulsepond.sdk/PulsepondDiagnosticListener { // dev.pu
 }
 
 final class dev.pulsepond.sdk/Pulsepond { // dev.pulsepond.sdk/Pulsepond|null[0]
-    constructor <init>(dev.pulsepond.sdk/PulsepondConfiguration) // dev.pulsepond.sdk/Pulsepond.<init>|<init>(dev.pulsepond.sdk.PulsepondConfiguration){}[0]
-
-    final fun reset() // dev.pulsepond.sdk/Pulsepond.reset|reset(){}[0]
     final fun track(kotlin/String): kotlin/String? // dev.pulsepond.sdk/Pulsepond.track|track(kotlin.String){}[0]
     final fun track(kotlin/String, dev.pulsepond.sdk/PulsepondProperties?): kotlin/String? // dev.pulsepond.sdk/Pulsepond.track|track(kotlin.String;dev.pulsepond.sdk.PulsepondProperties?){}[0]
     final suspend fun flush() // dev.pulsepond.sdk/Pulsepond.flush|flush(){}[0]
+    final suspend fun reset() // dev.pulsepond.sdk/Pulsepond.reset|reset(){}[0]
     final suspend fun shutdown() // dev.pulsepond.sdk/Pulsepond.shutdown|shutdown(){}[0]
 }
 
 final class dev.pulsepond.sdk/PulsepondConfiguration { // dev.pulsepond.sdk/PulsepondConfiguration|null[0]
-    constructor <init>(kotlin/String, kotlin/String, kotlin/String, kotlin/String? = ..., kotlin/String? = ..., kotlin/Int = ..., kotlin/Long = ..., kotlin/Int = ..., kotlin/Long = ..., dev.pulsepond.sdk/PulsepondDiagnosticListener? = ...) // dev.pulsepond.sdk/PulsepondConfiguration.<init>|<init>(kotlin.String;kotlin.String;kotlin.String;kotlin.String?;kotlin.String?;kotlin.Int;kotlin.Long;kotlin.Int;kotlin.Long;dev.pulsepond.sdk.PulsepondDiagnosticListener?){}[0]
+    constructor <init>(kotlin/String, kotlin/String, kotlin/String, kotlin/String, kotlin/String, kotlin/String, kotlin/String? = ..., kotlin/String? = ..., kotlin/Int = ..., kotlin/Long = ..., kotlin/Int = ..., kotlin/Long = ..., dev.pulsepond.sdk/PulsepondDiagnosticListener? = ...) // dev.pulsepond.sdk/PulsepondConfiguration.<init>|<init>(kotlin.String;kotlin.String;kotlin.String;kotlin.String;kotlin.String;kotlin.String;kotlin.String?;kotlin.String?;kotlin.Int;kotlin.Long;kotlin.Int;kotlin.Long;dev.pulsepond.sdk.PulsepondDiagnosticListener?){}[0]
 
     final val appVersion // dev.pulsepond.sdk/PulsepondConfiguration.appVersion|{}appVersion[0]
         final fun <get-appVersion>(): kotlin/String? // dev.pulsepond.sdk/PulsepondConfiguration.appVersion.<get-appVersion>|<get-appVersion>(){}[0]
     final val batchSize // dev.pulsepond.sdk/PulsepondConfiguration.batchSize|{}batchSize[0]
         final fun <get-batchSize>(): kotlin/Int // dev.pulsepond.sdk/PulsepondConfiguration.batchSize.<get-batchSize>|<get-batchSize>(){}[0]
+    final val deploymentId // dev.pulsepond.sdk/PulsepondConfiguration.deploymentId|{}deploymentId[0]
+        final fun <get-deploymentId>(): kotlin/String // dev.pulsepond.sdk/PulsepondConfiguration.deploymentId.<get-deploymentId>|<get-deploymentId>(){}[0]
     final val diagnosticListener // dev.pulsepond.sdk/PulsepondConfiguration.diagnosticListener|{}diagnosticListener[0]
         final fun <get-diagnosticListener>(): dev.pulsepond.sdk/PulsepondDiagnosticListener? // dev.pulsepond.sdk/PulsepondConfiguration.diagnosticListener.<get-diagnosticListener>|<get-diagnosticListener>(){}[0]
     final val endpoint // dev.pulsepond.sdk/PulsepondConfiguration.endpoint|{}endpoint[0]
@@ -55,8 +57,12 @@ final class dev.pulsepond.sdk/PulsepondConfiguration { // dev.pulsepond.sdk/Puls
         final fun <get-flushIntervalMilliseconds>(): kotlin/Long // dev.pulsepond.sdk/PulsepondConfiguration.flushIntervalMilliseconds.<get-flushIntervalMilliseconds>|<get-flushIntervalMilliseconds>(){}[0]
     final val maxQueueSize // dev.pulsepond.sdk/PulsepondConfiguration.maxQueueSize|{}maxQueueSize[0]
         final fun <get-maxQueueSize>(): kotlin/Int // dev.pulsepond.sdk/PulsepondConfiguration.maxQueueSize.<get-maxQueueSize>|<get-maxQueueSize>(){}[0]
+    final val projectId // dev.pulsepond.sdk/PulsepondConfiguration.projectId|{}projectId[0]
+        final fun <get-projectId>(): kotlin/String // dev.pulsepond.sdk/PulsepondConfiguration.projectId.<get-projectId>|<get-projectId>(){}[0]
     final val release // dev.pulsepond.sdk/PulsepondConfiguration.release|{}release[0]
         final fun <get-release>(): kotlin/String? // dev.pulsepond.sdk/PulsepondConfiguration.release.<get-release>|<get-release>(){}[0]
+    final val sourceId // dev.pulsepond.sdk/PulsepondConfiguration.sourceId|{}sourceId[0]
+        final fun <get-sourceId>(): kotlin/String // dev.pulsepond.sdk/PulsepondConfiguration.sourceId.<get-sourceId>|<get-sourceId>(){}[0]
     final val writeKey // dev.pulsepond.sdk/PulsepondConfiguration.writeKey|{}writeKey[0]
         final fun <get-writeKey>(): kotlin/String // dev.pulsepond.sdk/PulsepondConfiguration.writeKey.<get-writeKey>|<get-writeKey>(){}[0]
 }
@@ -89,6 +95,14 @@ final class dev.pulsepond.sdk/PulsepondProperties { // dev.pulsepond.sdk/Pulsepo
     final fun setString(kotlin/String, kotlin/String): dev.pulsepond.sdk/PulsepondProperties // dev.pulsepond.sdk/PulsepondProperties.setString|setString(kotlin.String;kotlin.String){}[0]
 }
 
+final class dev.pulsepond.sdk/PulsepondStorageException : kotlin/IllegalStateException { // dev.pulsepond.sdk/PulsepondStorageException|null[0]
+    constructor <init>(kotlin/String) // dev.pulsepond.sdk/PulsepondStorageException.<init>|<init>(kotlin.String){}[0]
+}
+
 final class dev.pulsepond.sdk/PulsepondValidationException : kotlin/IllegalArgumentException { // dev.pulsepond.sdk/PulsepondValidationException|null[0]
     constructor <init>(kotlin/String) // dev.pulsepond.sdk/PulsepondValidationException.<init>|<init>(kotlin.String){}[0]
+}
+
+final object dev.pulsepond.sdk/PulsepondApple { // dev.pulsepond.sdk/PulsepondApple|null[0]
+    final suspend fun create(dev.pulsepond.sdk/PulsepondConfiguration): dev.pulsepond.sdk/Pulsepond // dev.pulsepond.sdk/PulsepondApple.create|create(dev.pulsepond.sdk.PulsepondConfiguration){}[0]
 }
