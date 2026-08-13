@@ -1,12 +1,13 @@
 # Releasing
 
-Pulsepond Mobile SDK publishes Android artifacts to Maven Central and attaches the Apple XCFramework archive, checksum, and provenance to the matching GitHub release. A release must never be published until every credential below is configured as a repository Actions secret:
+Pulsepond Mobile SDK publishes Android artifacts to Maven Central and attaches the Apple XCFramework archive, checksum, and provenance to the matching GitHub release. A release must never be published until these repository Actions secrets are configured:
 
 - `MAVEN_CENTRAL_USERNAME`
 - `MAVEN_CENTRAL_PASSWORD`
 - `SIGNING_KEY_ID`
-- `SIGNING_PASSWORD`
 - `GPG_KEY_CONTENTS`
+
+Configure `SIGNING_PASSWORD` only when the exported GPG private key is protected by a passphrase. The current workflow requires `SIGNING_KEY_ID` so Gradle selects the intended key explicitly.
 
 The release workflow passes only configured/not-configured flags to the preflight script; the script never receives or prints a secret value. It stops before build, signing, or upload when configuration is incomplete. The actual credentials are exposed only to the final Maven publication step.
 

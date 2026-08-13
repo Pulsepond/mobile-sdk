@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+      - name: Test release credential validation
+        run: ./scripts/check-release-secrets.test.sh
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v6
       - name: Set up JDK 21

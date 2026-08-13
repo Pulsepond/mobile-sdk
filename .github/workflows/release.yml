@@ -46,7 +46,6 @@ jobs:
           MAVEN_CENTRAL_USERNAME_CONFIGURED: ${{ secrets.MAVEN_CENTRAL_USERNAME != '' }}
           MAVEN_CENTRAL_PASSWORD_CONFIGURED: ${{ secrets.MAVEN_CENTRAL_PASSWORD != '' }}
           SIGNING_KEY_ID_CONFIGURED: ${{ secrets.SIGNING_KEY_ID != '' }}
-          SIGNING_PASSWORD_CONFIGURED: ${{ secrets.SIGNING_PASSWORD != '' }}
           GPG_KEY_CONTENTS_CONFIGURED: ${{ secrets.GPG_KEY_CONTENTS != '' }}
         run: ./scripts/check-release-secrets.sh
       - name: Validate Gradle wrapper
@@ -106,10 +105,14 @@ jobs:
             exit 1
           fi
       - name: Publish Android artifact to Maven Central
-        run: ./gradlew :sdk:publishToMavenCentral --no-configuration-cache
+        shell: bash
+        run: |
+          source ./scripts/configure-signing-environment.sh
+          configure_signing_environment
+          ./gradlew :sdk:publishToMavenCentral --no-configuration-cache
         env:
           ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.SIGNING_KEY_ID }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_KEY_CONTENTS }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
