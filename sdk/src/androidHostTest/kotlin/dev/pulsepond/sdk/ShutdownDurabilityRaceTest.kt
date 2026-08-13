@@ -1,6 +1,7 @@
 package dev.pulsepond.sdk
 
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
@@ -8,26 +9,24 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.StandardTestDispatcher
-import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.yield
+import kotlinx.coroutines.withContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ShutdownDurabilityRaceTest {
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun earlierSnapshotSuccessSupersedesCancelledShutdownsFailedDuplicate() = runTest {
         val persistence = BlockingFirstReplacePersistence()
         val diagnostics = mutableListOf<PulsepondDiagnostic>()
         val clientScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val shutdownDispatcher = StandardTestDispatcher(testScheduler)
+        val shutdownDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
         val client = Pulsepond(
             configuration = PulsepondConfiguration(
                 endpoint = "https://events.example.com/v1/batch",
@@ -48,34 +47,38 @@ class ShutdownDurabilityRaceTest {
         )
         client.track("pending")
         val initiatorFailure = CompletableDeferred<Throwable?>()
-        val initiator = launch(shutdownDispatcher) {
-            try {
-                client.shutdown()
-                initiatorFailure.complete(null)
-            } catch (error: Throwable) {
-                initiatorFailure.complete(error)
+        try {
+            val initiator = launch(shutdownDispatcher) {
+                try {
+                    client.shutdown()
+                    initiatorFailure.complete(null)
+                } catch (error: Throwable) {
+                    initiatorFailure.complete(error)
+                }
             }
+            assertTrue(persistence.firstReplaceStarted.await(5, TimeUnit.SECONDS))
+            val waiter = async(shutdownDispatcher) { runCatching { client.shutdown() } }
+            withContext(shutdownDispatcher) {}
+
+            initiator.cancel()
+            withContext(shutdownDispatcher) {}
+            persistence.releaseFirstReplace.countDown()
+
+            initiator.join()
+            assertTrue(initiatorFailure.await() is CancellationException)
+            assertTrue(waiter.await().isSuccess)
+            assertEquals(2, persistence.replaceCalls.get())
+            assertFalse(
+                diagnostics.any {
+                    it.code == PulsepondDiagnosticCode.StorageFailed ||
+                        it.code == PulsepondDiagnosticCode.DeliveryFailed
+                },
+            )
+        } finally {
+            persistence.releaseFirstReplace.countDown()
+            clientScope.cancel()
+            shutdownDispatcher.close()
         }
-        runCurrent()
-        assertTrue(persistence.firstReplaceStarted.await(5, TimeUnit.SECONDS))
-        val waiter = async(shutdownDispatcher) { runCatching { client.shutdown() } }
-        runCurrent()
-
-        initiator.cancel()
-        yield()
-        persistence.releaseFirstReplace.countDown()
-
-        initiator.join()
-        assertTrue(initiatorFailure.await() is CancellationException)
-        assertTrue(waiter.await().isSuccess)
-        assertEquals(2, persistence.replaceCalls.get())
-        assertFalse(
-            diagnostics.any {
-                it.code == PulsepondDiagnosticCode.StorageFailed ||
-                    it.code == PulsepondDiagnosticCode.DeliveryFailed
-            },
-        )
-        clientScope.cancel()
     }
 }
 
