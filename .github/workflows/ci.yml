@@ -16,7 +16,7 @@ concurrency:
 jobs:
   android:
     name: Android and API
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, azure]
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
