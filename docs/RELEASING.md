@@ -23,6 +23,16 @@ The workflow checks out the fully qualified tag without persisting GitHub creden
 
 1. packages and verifies `Pulsepond.xcframework.zip`;
 2. uploads the Apple archive, SHA-256 file, and commit-bound provenance without overwriting an existing asset set;
-3. signs and publishes `dev.pulsepond:pulsepond:<version>` to Maven Central.
+3. signs, validates, and releases `dev.pulsepond:pulsepond:<version>` to Maven Central.
 
-If a transient failure occurs, rerun the failed workflow. A retry accepts an existing Apple asset set only when all three files exist and their checksum and provenance match the same release commit. Do not create a second release for the same version.
+The Central Repository may take 10–30 minutes to expose a successfully released version. The workflow performs the Portal publish action automatically; do not create or publish a second deployment while synchronization is pending.
+
+Failures before the Maven publication step starts are safe to rerun. A retry accepts an existing Apple asset set only when all three files exist and their checksum and provenance match the same release commit.
+
+Once the Maven publication step has started, a failed workflow is ambiguous: Central may have accepted the deployment before the runner lost its response or timed out while polling. Check the version in Central Portal before retrying:
+
+- If its state is pending, validating, validated, publishing, or published, do not rerun. Wait for that deployment or resolve its reported state.
+- If its state is failed, inspect the validation errors and drop the deployment before retrying the corrected release. Retain it instead when working with Central Support.
+- If no deployment appears after a lost response, wait and check again. Retry only after the Portal or API proves that no active or published deployment exists for the version.
+
+Never create a second GitHub release for the same version.
