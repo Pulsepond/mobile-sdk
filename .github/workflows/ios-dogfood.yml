@@ -9,11 +9,6 @@ on:
       - scripts/write-ios-dogfood-config.sh
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: Immutable mobile SDK release tag
-        required: true
-        default: v0.1.0
-        type: string
       endpoint:
         description: Pulsepond /v1/batch endpoint
         required: true
@@ -51,7 +46,10 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 20
     env:
-      PULSEPOND_RELEASE_TAG: ${{ inputs.release_tag || 'v0.1.0' }}
+      PULSEPOND_RELEASE_TAG: v0.1.0
+      PULSEPOND_RELEASE_COMMIT: 80cd6709c562549c9b7f98938f5a08206d029748
+      PULSEPOND_ARCHIVE_SHA256: 020102ac71c8c3bf36b15fd5ac73934ceb92d8fb8ee00385ffedbb626cf9f855
+      PULSEPOND_ARTIFACT_VERSION: 0.1.0
       PULSEPOND_ENDPOINT: ${{ inputs.endpoint || 'https://events.example.com/v1/batch' }}
       PULSEPOND_DEPLOYMENT_ID: ${{ inputs.deployment_id || '01234567-89ab-4def-8abc-0123456789ab' }}
       PULSEPOND_PROJECT_ID: ${{ inputs.project_id || 'project_foundation' }}
@@ -82,11 +80,19 @@ jobs:
             cd "$asset_dir"
             shasum -a 256 -c Pulsepond.xcframework.zip.sha256
           )
-          release_commit="$(git rev-list -n 1 "$PULSEPOND_RELEASE_TAG")"
           archive_sha="$(shasum -a 256 "$asset_dir/Pulsepond.xcframework.zip" | awk '{print $1}')"
+          release_commit="$(git rev-list -n 1 "$PULSEPOND_RELEASE_TAG")"
+          if [[ "$release_commit" != "$PULSEPOND_RELEASE_COMMIT" ]]; then
+            echo "Release tag does not match the pinned v0.1.0 commit." >&2
+            exit 1
+          fi
+          if [[ "$archive_sha" != "$PULSEPOND_ARCHIVE_SHA256" ]]; then
+            echo "Release archive does not match the pinned v0.1.0 SHA-256." >&2
+            exit 1
+          fi
           jq -e \
-            --arg commit "$release_commit" \
-            --arg sha256 "$archive_sha" \
+            --arg commit "$PULSEPOND_RELEASE_COMMIT" \
+            --arg sha256 "$PULSEPOND_ARCHIVE_SHA256" \
             '.artifact == "Pulsepond.xcframework.zip" and .commit == $commit and .sha256 == $sha256' \
             "$asset_dir/Pulsepond.xcframework.zip.provenance.json" >/dev/null
           ditto -x -k "$asset_dir/Pulsepond.xcframework.zip" "$extracted_dir"
@@ -101,8 +107,7 @@ jobs:
             echo "Configure the PULSEPOND_DOGFOOD_WRITE_KEY repository secret before dispatch." >&2
             exit 1
           fi
-          PULSEPOND_ARTIFACT_VERSION="${PULSEPOND_RELEASE_TAG#v}" \
-            ./scripts/write-ios-dogfood-config.sh
+          ./scripts/write-ios-dogfood-config.sh
       - name: Select an available iOS Simulator
         shell: bash
         run: |
