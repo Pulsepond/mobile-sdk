@@ -1,0 +1,146 @@
+name: Published iOS SDK dogfood
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/ios-dogfood.yml
+      - dogfood/ios/**
+      - scripts/write-ios-dogfood-config.sh
+  workflow_dispatch:
+    inputs:
+      endpoint:
+        description: Pulsepond /v1/batch endpoint
+        required: true
+        default: https://pulsepond.xeodou.workers.dev/v1/batch
+        type: string
+      deployment_id:
+        description: Canonical lowercase UUID for this dogfood deployment
+        required: true
+        type: string
+      project_id:
+        description: Pulsepond project ID
+        required: true
+        default: default
+        type: string
+      source_id:
+        description: Enabled dogfood source ID
+        required: true
+        type: string
+      event_name:
+        description: Allowed dogfood event name
+        required: true
+        default: sdk_dogfood
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-dogfood-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  published-xcframework:
+    name: Published XCFramework consumer
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      PULSEPOND_RELEASE_TAG: v0.1.0
+      PULSEPOND_RELEASE_COMMIT: 80cd6709c562549c9b7f98938f5a08206d029748
+      PULSEPOND_ARCHIVE_SHA256: 020102ac71c8c3bf36b15fd5ac73934ceb92d8fb8ee00385ffedbb626cf9f855
+      PULSEPOND_ARTIFACT_VERSION: 0.1.0
+      PULSEPOND_ENDPOINT: ${{ inputs.endpoint || 'https://events.example.com/v1/batch' }}
+      PULSEPOND_DEPLOYMENT_ID: ${{ inputs.deployment_id || '01234567-89ab-4def-8abc-0123456789ab' }}
+      PULSEPOND_PROJECT_ID: ${{ inputs.project_id || 'project_foundation' }}
+      PULSEPOND_SOURCE_ID: ${{ inputs.source_id || 'source_ios' }}
+      PULSEPOND_EVENT_NAME: ${{ inputs.event_name || 'view_work' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download and verify immutable XCFramework
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          asset_dir="build/ios-dogfood-assets"
+          extracted_dir="build/ios-dogfood-extracted"
+          mkdir -p "$asset_dir" "$extracted_dir"
+          gh release download "$PULSEPOND_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern Pulsepond.xcframework.zip \
+            --pattern Pulsepond.xcframework.zip.sha256 \
+            --pattern Pulsepond.xcframework.zip.provenance.json \
+            --dir "$asset_dir"
+          (
+            cd "$asset_dir"
+            shasum -a 256 -c Pulsepond.xcframework.zip.sha256
+          )
+          archive_sha="$(shasum -a 256 "$asset_dir/Pulsepond.xcframework.zip" | awk '{print $1}')"
+          release_commit="$(git rev-list -n 1 "$PULSEPOND_RELEASE_TAG")"
+          if [[ "$release_commit" != "$PULSEPOND_RELEASE_COMMIT" ]]; then
+            echo "Release tag does not match the pinned v0.1.0 commit." >&2
+            exit 1
+          fi
+          if [[ "$archive_sha" != "$PULSEPOND_ARCHIVE_SHA256" ]]; then
+            echo "Release archive does not match the pinned v0.1.0 SHA-256." >&2
+            exit 1
+          fi
+          jq -e \
+            --arg commit "$PULSEPOND_RELEASE_COMMIT" \
+            --arg sha256 "$PULSEPOND_ARCHIVE_SHA256" \
+            '.artifact == "Pulsepond.xcframework.zip" and .commit == $commit and .sha256 == $sha256' \
+            "$asset_dir/Pulsepond.xcframework.zip.provenance.json" >/dev/null
+          ditto -x -k "$asset_dir/Pulsepond.xcframework.zip" "$extracted_dir"
+          cp -R "$extracted_dir/Pulsepond.xcframework" dogfood/ios/Pulsepond.xcframework
+      - name: Prepare isolated consumer configuration
+        shell: bash
+        env:
+          PULSEPOND_WRITE_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.PULSEPOND_DOGFOOD_WRITE_KEY || 'ppw_v1_0123456789abcdef0123456789abcdef_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' }}
+          PULSEPOND_DOGFOOD_WRITE_KEY_CONFIGURED: ${{ secrets.PULSEPOND_DOGFOOD_WRITE_KEY != '' }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$PULSEPOND_DOGFOOD_WRITE_KEY_CONFIGURED" != "true" ]]; then
+            echo "Configure the PULSEPOND_DOGFOOD_WRITE_KEY repository secret before dispatch." >&2
+            exit 1
+          fi
+          ./scripts/write-ios-dogfood-config.sh
+      - name: Select an available iOS Simulator
+        shell: bash
+        run: |
+          simulator_id="$(xcrun simctl list devices available --json | jq -er \
+            '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')"
+          echo "PULSEPOND_SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
+      - name: Select the generated Swift Package scheme
+        shell: bash
+        working-directory: dogfood/ios
+        run: |
+          scheme="$(xcodebuild -list -json | jq -er \
+            '(.workspace.schemes // .project.schemes) | select(length == 1) | .[0]')"
+          echo "PULSEPOND_XCODE_SCHEME=$scheme" >> "$GITHUB_ENV"
+      - name: Compile published SDK consumer
+        shell: bash
+        working-directory: dogfood/ios
+        run: |
+          xcodebuild \
+            -scheme "$PULSEPOND_XCODE_SCHEME" \
+            -destination "platform=iOS Simulator,id=$PULSEPOND_SIMULATOR_ID" \
+            build-for-testing
+      - name: Send and flush the iOS dogfood event
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        working-directory: dogfood/ios
+        run: |
+          xcodebuild \
+            -scheme "$PULSEPOND_XCODE_SCHEME" \
+            -destination "platform=iOS Simulator,id=$PULSEPOND_SIMULATOR_ID" \
+            -only-testing:PulsepondDogfoodTests/PulsepondDogfoodTests/testPublishedSDKDelivers \
+            test-without-building
+      - name: Remove generated credential material
+        if: always()
+        shell: bash
+        run: |
+          rm -f dogfood/ios/Tests/PulsepondDogfoodTests/Fixtures/config.json

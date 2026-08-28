@@ -2,6 +2,8 @@
 .gradle
 .idea
 .DS_Store
+dogfood/ios/Pulsepond.xcframework
+dogfood/ios/Tests/PulsepondDogfoodTests/Fixtures/config.json
 build
 captures
 .externalNativeBuild
