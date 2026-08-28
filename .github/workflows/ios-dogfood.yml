@@ -111,18 +111,18 @@ jobs:
           echo "PULSEPOND_SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
       - name: Compile published SDK consumer
         shell: bash
+        working-directory: dogfood/ios
         run: |
           xcodebuild \
-            -packagePath dogfood/ios \
             -scheme PulsepondDogfood \
             -destination "platform=iOS Simulator,id=$PULSEPOND_SIMULATOR_ID" \
             build-for-testing
       - name: Send and flush the iOS dogfood event
         if: github.event_name == 'workflow_dispatch'
         shell: bash
+        working-directory: dogfood/ios
         run: |
           xcodebuild \
-            -packagePath dogfood/ios \
             -scheme PulsepondDogfood \
             -destination "platform=iOS Simulator,id=$PULSEPOND_SIMULATOR_ID" \
             -only-testing:PulsepondDogfoodTests/PulsepondDogfoodTests/testPublishedSDKDelivers \
