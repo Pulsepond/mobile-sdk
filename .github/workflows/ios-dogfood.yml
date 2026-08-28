@@ -109,12 +109,19 @@ jobs:
           simulator_id="$(xcrun simctl list devices available --json | jq -er \
             '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')"
           echo "PULSEPOND_SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
+      - name: Select the generated Swift Package scheme
+        shell: bash
+        working-directory: dogfood/ios
+        run: |
+          scheme="$(xcodebuild -list -json | jq -er \
+            '(.workspace.schemes // .project.schemes) | select(length == 1) | .[0]')"
+          echo "PULSEPOND_XCODE_SCHEME=$scheme" >> "$GITHUB_ENV"
       - name: Compile published SDK consumer
         shell: bash
         working-directory: dogfood/ios
         run: |
           xcodebuild \
-            -scheme PulsepondDogfood \
+            -scheme "$PULSEPOND_XCODE_SCHEME" \
             -destination "platform=iOS Simulator,id=$PULSEPOND_SIMULATOR_ID" \
             build-for-testing
       - name: Send and flush the iOS dogfood event
@@ -123,7 +130,7 @@ jobs:
         working-directory: dogfood/ios
         run: |
           xcodebuild \
-            -scheme PulsepondDogfood \
+            -scheme "$PULSEPOND_XCODE_SCHEME" \
             -destination "platform=iOS Simulator,id=$PULSEPOND_SIMULATOR_ID" \
             -only-testing:PulsepondDogfoodTests/PulsepondDogfoodTests/testPublishedSDKDelivers \
             test-without-building
